@@ -1,0 +1,24 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Regla para la colección de contactos
+    match /contacts/{contactId} {
+      // Permitir solo escritura (crear documentos)
+      allow create: if request.resource.data.name is string &&
+                       request.resource.data.email is string &&
+                       request.resource.data.message is string &&
+                       request.resource.data.timestamp is timestamp;
+      
+      // Deshabilitar lectura pública
+      allow read: if false;
+      
+      // Deshabilitar actualización y eliminación pública
+      allow update, delete: if false;
+    }
+    
+    // Denegar acceso a todas las demás colecciones por defecto
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

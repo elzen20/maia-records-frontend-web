@@ -1,0 +1,113 @@
+.logo-showcase {
+  background: linear-gradient(135deg, var(--primary-dark) 0%, rgba(147, 51, 234, 0.08) 50%, var(--primary-dark) 100%);
+  border-bottom: 1px solid var(--border-color);
+  padding: 80px 20px !important;
+}
+
+.showcase-intro {
+  text-align: center;
+  font-size: 18px;
+  color: var(--text-muted);
+  margin-bottom: 60px;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.8;
+}
+
+.logos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 30px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.logo-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  perspective: 1000px;
+}
+
+.logo-card {
+  width: 100%;
+  aspect-ratio: 1;
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.1), rgba(168, 85, 247, 0.1));
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  transition: all 0.4s ease;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.logo-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.2), rgba(168, 85, 247, 0.2));
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  z-index: -1;
+}
+
+.logo-card:hover {
+  border-color: var(--accent-light);
+  transform: translateY(-10px) rotateX(5deg);
+  box-shadow: 0 20px 50px rgba(147, 51, 234, 0.3);
+}
+
+.logo-card:hover::before {
+  opacity: 1;
+}
+
+.logo-card img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 10px rgba(147, 51, 234, 0.2));
+  transition: filter 0.3s ease;
+}
+
+.logo-card:hover img {
+  filter: drop-shadow(0 0 20px rgba(147, 51, 234, 0.5));
+}
+
+@media (max-width: 768px) {
+  .logo-showcase {
+    padding: 60px 20px !important;
+  }
+
+  .logos-grid {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 20px;
+  }
+
+  .logo-card {
+    padding: 15px;
+  }
+
+  .showcase-intro {
+    font-size: 16px;
+    margin-bottom: 40px;
+  }
+}
+
+@media (max-width: 480px) {
+  .logos-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 15px;
+  }
+
+  .logo-card {
+    padding: 12px;
+  }
+}

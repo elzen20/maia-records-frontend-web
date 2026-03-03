@@ -1,0 +1,182 @@
+.contact {
+  background: linear-gradient(135deg, var(--primary-dark) 0%, rgba(147, 51, 234, 0.1) 50%, var(--primary-dark) 100%);
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+  overflow: hidden;
+}
+
+.contact::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-image: url('/assets/imagenes-decoracion/star-trails-1846734.jpg');
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  opacity: 0.08;
+  z-index: 0;
+}
+
+.contact .container {
+  position: relative;
+  z-index: 1;
+}
+
+.contact-intro {
+  text-align: center;
+  font-size: 18px;
+  color: var(--text-muted);
+  margin-bottom: 60px;
+  max-width: 600px;
+  margin-left: auto;
+  margin-right: auto;
+  line-height: 1.8;
+}
+
+.contact-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 60px;
+  align-items: start;
+}
+
+.contact-info {
+  display: grid;
+  gap: 30px;
+}
+
+.info-card {
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.08), rgba(168, 85, 247, 0.08));
+  border: 1px solid var(--border-color);
+  padding: 30px;
+  border-radius: 12px;
+  transition: all 0.3s ease;
+}
+
+.info-card:hover {
+  border-color: var(--accent-light);
+  transform: translateX(10px);
+}
+
+.info-icon {
+  font-size: 36px;
+  margin-bottom: 15px;
+  display: block;
+}
+
+.info-card h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--accent-light);
+  margin-bottom: 10px;
+}
+
+.info-card p {
+  color: var(--text-muted);
+  font-size: 16px;
+}
+
+.info-card a {
+  color: var(--accent-light);
+  transition: color 0.3s ease;
+}
+
+.info-card a:hover {
+  color: var(--accent-purple);
+}
+
+.contact-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.contact-form input,
+.contact-form textarea {
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.05), rgba(168, 85, 247, 0.05));
+  border: 1px solid var(--border-color);
+  color: var(--text-light);
+  padding: 15px 20px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-family: inherit;
+  transition: all 0.3s ease;
+}
+
+.contact-form input::placeholder,
+.contact-form textarea::placeholder {
+  color: var(--text-muted);
+}
+
+.contact-form input:focus,
+.contact-form textarea:focus {
+  outline: none;
+  border-color: var(--accent-light);
+  background: linear-gradient(135deg, rgba(147, 51, 234, 0.1), rgba(168, 85, 247, 0.1));
+  box-shadow: 0 0 20px rgba(147, 51, 234, 0.2);
+}
+
+.submit-button {
+  background: linear-gradient(135deg, var(--accent-purple), var(--accent-light));
+  color: white;
+  padding: 16px 40px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  margin-top: 10px;
+  box-shadow: 0 10px 30px rgba(147, 51, 234, 0.3);
+}
+
+.submit-button:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 15px 40px rgba(147, 51, 234, 0.5);
+}
+
+.submit-button:active {
+  transform: translateY(-1px);
+}
+
+.submit-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.submit-button:disabled:hover {
+  transform: none;
+  box-shadow: 0 10px 30px rgba(147, 51, 234, 0.3);
+}
+
+@media (max-width: 768px) {
+  .contact-content {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+
+  .contact-info {
+    gap: 20px;
+  }
+
+  .info-card {
+    padding: 20px;
+  }
+
+  .contact-form input,
+  .contact-form textarea {
+    padding: 12px 16px;
+    font-size: 15px;
+  }
+
+  .contact-intro {
+    font-size: 16px;
+  }
+}

@@ -1,0 +1,29 @@
+.App {
+  width: 100%;
+  min-height: 100vh;
+  background: var(--primary-dark);
+  color: var(--text-light);
+  overflow-x: hidden;
+}
+
+/* Smooth scrolling animations */
+section {
+  animation: fadeInUp 0.8s ease-in-out;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Selection styling */
+::selection {
+  background: var(--accent-purple);
+  color: white;
+}
