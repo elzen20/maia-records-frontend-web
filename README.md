@@ -1,16 +1,55 @@
-# React + Vite
+# Maia Records — Frontend Web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The official website for **Maia Records**, a world-class musical studio dedicated to nurturing talent, producing exceptional music, and sharing the art form through education and community.
 
-Currently, two official plugins are available:
+## Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Home** — Hero section, studio vision, mission & values
+- **About** — Studio story, mission & vision cards
+- **Artists** — Roster showcase across multiple genres
+- **Our Work** — Portfolio of albums, EPs, music videos, and live recordings
+- **Courses** — Music education catalog (voice, guitar, piano, production, drums, songwriting)
 
-## React Compiler
+## Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- [React 19](https://react.dev/) — UI library
+- [Vite](https://vite.dev/) — Build tool & dev server
+- [React Router v7](https://reactrouter.com/) — Client-side navigation
 
-## Expanding the ESLint configuration
+## Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```bash
+# Install dependencies
+npm install
+
+# Start development server
+npm run dev
+
+# Build for production
+npm run build
+
+# Preview production build
+npm run preview
+
+# Run linter
+npm run lint
+```
+
+## Project Structure
+
+```
+src/
+├── components/
+│   ├── Navbar.jsx    # Sticky navigation with mobile menu
+│   └── Footer.jsx    # Site footer with links
+├── pages/
+│   ├── Home.jsx      # Landing page
+│   ├── About.jsx     # Studio story, mission & vision
+│   ├── Artists.jsx   # Artist roster
+│   ├── Work.jsx      # Production portfolio
+│   └── Courses.jsx   # Music course catalog
+├── App.jsx           # Router setup & layout
+├── App.css           # Global styles & design system
+└── main.jsx          # Entry point
+```
+
