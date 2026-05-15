@@ -27,3 +27,10 @@ section {
   background: var(--accent-purple);
   color: white;
 }
+
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}

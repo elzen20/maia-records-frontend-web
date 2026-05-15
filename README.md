@@ -9,6 +9,7 @@ Página web profesional para Maia Records, un estudio de grabación especializad
 - **Optimizado**: Construido con Vite para máxima velocidad
 - **Mobile-Friendly**: Completamente responsivo para todos los dispositivos
 - **Animaciones**: Efectos visuales profesionales y pulidos
+- **Dashboard Admin**: Login protegido para cuantizar tracks (single y batch)
 
 ## 📋 Requisitos
 
@@ -28,6 +29,16 @@ cd maia-records-frontend-web
 npm install
 ```
 
+3. Configura variables de entorno:
+```bash
+cp .env.example .env.local
+```
+
+Define al menos:
+
+- `VITE_QUANTIZE_API_BASE_URL`
+- `VITE_ADMIN_EMAILS` (correos separados por coma)
+
 ## 🏃 Desarrollo
 
 Para iniciar el servidor de desarrollo:
@@ -37,6 +48,11 @@ npm run dev
 ```
 
 La aplicación se abrirá automáticamente en `http://localhost:3000`
+
+Rutas admin:
+
+- `/admin/login`
+- `/admin/quantize`
 
 ## 🏗️ Construcción
 

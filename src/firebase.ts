@@ -1,6 +1,7 @@
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 import { getAnalytics } from "firebase/analytics";
+import { getAuth } from "firebase/auth";
 
 // Configuración Firebase (requiere variables de entorno - NO hardcodeadas)
 if (!import.meta.env.VITE_FIREBASE_API_KEY) {
@@ -22,6 +23,9 @@ const app = initializeApp(firebaseConfig);
 
 // Inicializar Firestore
 export const db = getFirestore(app);
+
+// Inicializar Firebase Auth
+export const auth = getAuth(app);
 
 // Inicializar Analytics (opcional y seguro)
 export const analytics = typeof window !== "undefined" ? getAnalytics(app) : null;

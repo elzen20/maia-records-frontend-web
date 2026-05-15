@@ -1,0 +1,137 @@
+.quantize-dashboard-page {
+  min-height: 100vh;
+  padding: 24px 16px 40px;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
+.quantize-dashboard-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.quantize-dashboard-header h1 {
+  margin-bottom: 4px;
+}
+
+.quantize-dashboard-header p {
+  color: var(--text-muted);
+}
+
+.quantize-dashboard-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.quantize-dashboard-actions button,
+.quantize-panel button {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, var(--accent-purple), var(--accent-light));
+  color: white;
+  font-weight: 700;
+}
+
+.ghost-link {
+  color: #93c5fd;
+}
+
+.quantize-panel {
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 16px;
+  background: linear-gradient(160deg, rgba(26, 31, 42, 0.85), rgba(15, 20, 25, 0.88));
+}
+
+.quantize-panel h2 {
+  margin-bottom: 12px;
+}
+
+.quantize-form-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.quantize-form-grid input,
+.quantize-form-grid select {
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color);
+  background: rgba(15, 20, 25, 0.7);
+  color: var(--text-light);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.checkbox-row input {
+  width: 18px;
+  height: 18px;
+}
+
+.quantize-panel pre {
+  margin-top: 12px;
+  max-height: 280px;
+  overflow: auto;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 12px;
+  background: rgba(15, 20, 25, 0.75);
+}
+
+.download-link-row {
+  margin-top: 12px;
+  word-break: break-all;
+}
+
+.download-link-row a {
+  color: #93c5fd;
+}
+
+.status-message,
+.status-error {
+  margin-top: 10px;
+  padding: 12px;
+  border-radius: 10px;
+}
+
+.status-message {
+  background: rgba(16, 185, 129, 0.18);
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.status-error {
+  background: rgba(239, 68, 68, 0.18);
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  color: #fecaca;
+}
+
+.auth-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+@media (min-width: 800px) {
+  .quantize-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 14px;
+  }
+
+  .quantize-form-grid button,
+  .quantize-form-grid .checkbox-row {
+    grid-column: span 2;
+  }
+}

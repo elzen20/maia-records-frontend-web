@@ -1,26 +1,26 @@
 import React from 'react';
+import { Navigate, Route, Routes } from 'react-router-dom';
 import './App.css';
-import Header from './components/Header';
-import Hero from './components/Hero';
-import About from './components/About';
-import VisionMission from './components/VisionMission';
-import Services from './components/Services';
-import RentalInstruments from './components/RentalInstruments';
-import Contact from './components/Contact';
-import Footer from './components/Footer';
+import HomePage from './pages/HomePage';
+import AdminLoginPage from './pages/AdminLoginPage';
+import QuantizeDashboardPage from './pages/QuantizeDashboardPage';
+import ProtectedAdminRoute from './components/auth/ProtectedAdminRoute';
 
 function App() {
   return (
-    <div className="App">
-      <Header />
-      <Hero />
-      <About />
-      <VisionMission />
-      <Services />
-      <RentalInstruments />
-      <Contact />
-      <Footer />
-    </div>
+    <Routes>
+      <Route path="/" element={<HomePage />} />
+      <Route path="/admin/login" element={<AdminLoginPage />} />
+      <Route
+        path="/admin/quantize"
+        element={(
+          <ProtectedAdminRoute>
+            <QuantizeDashboardPage />
+          </ProtectedAdminRoute>
+        )}
+      />
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }
 

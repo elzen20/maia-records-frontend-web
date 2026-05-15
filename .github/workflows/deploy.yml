@@ -40,6 +40,8 @@ jobs:
           VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ vars.MESSAGINGSENDERID }}
           VITE_FIREBASE_APP_ID: ${{ vars.APPID }}
           VITE_FIREBASE_MEASUREMENT_ID: ${{ vars.MEASUREMENTID }}
+          VITE_QUANTIZE_API_BASE_URL: ${{ vars.QUANTIZE_API_BASE_URL }}
+          VITE_ADMIN_EMAILS: ${{ vars.ADMIN_EMAILS }}
 
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
