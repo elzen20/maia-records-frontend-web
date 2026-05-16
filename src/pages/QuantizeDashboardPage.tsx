@@ -205,27 +205,28 @@ function QuantizeDashboardPage() {
 
       const response = await quantizeSingle(formData);
 
-      if (!response.ok) {
+      if (response.status === 201 || response.ok) {
+        console.log('Respuesta del servidor:', response);
+      } else {
         console.error('Error en la respuesta del servidor:', response);
         throw new Error(await readErrorFromResponse(response));
-      } else {
-        console.log('Respuesta del servidor:', response);
       }
 
-      const shouldHandleAsFile = singleForm.responseMode === 'file' || !isJsonResponse(response);
-
-      if (shouldHandleAsFile) {
+      const contentType = response.headers.get('content-type') || '';
+      if (contentType.includes('audio/wav')) {
         const blob = await response.blob();
         const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
         triggerDownload(blob, filename);
         setMessage('Render WAV descargado correctamente.');
         return;
+      } else if (isJsonResponse(response)) {
+        const json = (await response.json()) as Record<string, unknown>;
+        console.log('Respuesta JSON recibida:', json);
+        setSingleResult(json);
+        setMessage('Cuantizacion individual completada.');
+      } else {
+        throw new Error('Tipo de respuesta desconocido o no soportado.');
       }
-
-      const json = (await response.json()) as Record<string, unknown>;
-      console.log('Respuesta JSON recibida:', json);
-      setSingleResult(json);
-      setMessage('Cuantizacion individual completada.');
     } catch (requestError) {
       setError(`Error en /quantize: ${formatRequestError(requestError)}`);
     } finally {
