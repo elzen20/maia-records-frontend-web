@@ -43,3 +43,11 @@ export async function cleanupQuantizeUploads(): Promise<Response> {
 export function buildOutputDownloadUrl(downloadPath: string): string {
   return buildApiUrl(downloadPath);
 }
+
+export async function downloadQuantizeOutput(downloadPath: string): Promise<Response> {
+  const headers = await getAuthHeaders();
+  return fetch(buildOutputDownloadUrl(downloadPath), {
+    method: 'GET',
+    headers,
+  });
+}

@@ -5,6 +5,7 @@ import { auth } from '../firebase';
 import {
   buildOutputDownloadUrl,
   cleanupQuantizeUploads,
+  downloadQuantizeOutput,
   quantizeBatch,
   quantizeSingle,
 } from '../services/quantizeApi';
@@ -98,6 +99,25 @@ function formatRequestError(error: unknown): string {
   return String(error);
 }
 
+function buildSingleFormData(
+  state: SingleFormState,
+  responseMode: SingleResponseMode,
+): FormData {
+  if (!state.file) {
+    throw new Error('Selecciona un archivo en el campo audio.');
+  }
+
+  const formData = new FormData();
+  formData.append('audio', state.file);
+  appendIfValue(formData, 'strength', state.strength);
+  appendIfValue(formData, 'gridSubdivision', state.gridSubdivision);
+  appendIfValue(formData, 'timeSignature', state.timeSignature);
+  formData.append('autoSubdivision', booleanAsText(state.autoSubdivision));
+  formData.append('renderAudio', booleanAsText(state.renderAudio));
+  formData.append('responseMode', responseMode);
+  return formData;
+}
+
 function QuantizeDashboardPage() {
   const navigate = useNavigate();
 
@@ -181,14 +201,7 @@ function QuantizeDashboardPage() {
     setSingleLoading(true);
 
     try {
-      const formData = new FormData();
-      formData.append('audio', singleForm.file);
-      appendIfValue(formData, 'strength', singleForm.strength);
-      appendIfValue(formData, 'gridSubdivision', singleForm.gridSubdivision);
-      appendIfValue(formData, 'timeSignature', singleForm.timeSignature);
-      formData.append('autoSubdivision', booleanAsText(singleForm.autoSubdivision));
-      formData.append('renderAudio', booleanAsText(singleForm.renderAudio));
-      formData.append('responseMode', singleForm.responseMode);
+      const formData = buildSingleFormData(singleForm, singleForm.responseMode);
 
       const response = await quantizeSingle(formData);
 
@@ -199,11 +212,52 @@ function QuantizeDashboardPage() {
       const shouldHandleAsFile = singleForm.responseMode === 'file' || !isJsonResponse(response);
 
       if (shouldHandleAsFile) {
-        const blob = await response.blob();
-        const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
-        triggerDownload(blob, filename);
-        setMessage('Render WAV descargado correctamente.');
-        return;
+        try {
+          const blob = await response.blob();
+          const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
+          triggerDownload(blob, filename);
+          setMessage('Render WAV descargado correctamente.');
+          return;
+        } catch (binaryReadError) {
+          if (singleForm.responseMode !== 'file') {
+            throw binaryReadError;
+          }
+
+          const fallbackFormData = buildSingleFormData(singleForm, 'json');
+          const fallbackResponse = await quantizeSingle(fallbackFormData);
+
+          if (!fallbackResponse.ok) {
+            throw new Error(await readErrorFromResponse(fallbackResponse));
+          }
+
+          if (!isJsonResponse(fallbackResponse)) {
+            throw binaryReadError;
+          }
+
+          const fallbackJson = (await fallbackResponse.json()) as Record<string, unknown>;
+          setSingleResult(fallbackJson);
+
+          const fallbackDownloadPath = fallbackJson.downloadPath;
+          if (typeof fallbackDownloadPath === 'string' && fallbackDownloadPath.trim()) {
+            const downloadResponse = await downloadQuantizeOutput(fallbackDownloadPath);
+
+            if (!downloadResponse.ok) {
+              throw new Error(await readErrorFromResponse(downloadResponse));
+            }
+
+            const fallbackBlob = await downloadResponse.blob();
+            const fallbackFilename = getFilenameFromHeaders(
+              downloadResponse,
+              `${singleForm.file.name}-quantized.wav`,
+            );
+            triggerDownload(fallbackBlob, fallbackFilename);
+            setMessage('Render WAV descargado por ruta de fallback (/quantize/output).');
+            return;
+          }
+
+          setMessage('Cuantizacion completada en modo JSON (sin downloadPath disponible).');
+          return;
+        }
       }
 
       const json = (await response.json()) as Record<string, unknown>;
