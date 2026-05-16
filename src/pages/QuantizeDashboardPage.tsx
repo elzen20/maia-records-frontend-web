@@ -5,7 +5,6 @@ import { auth } from '../firebase';
 import {
   buildOutputDownloadUrl,
   cleanupQuantizeUploads,
-  downloadQuantizeOutput,
   quantizeBatch,
   quantizeSingle,
 } from '../services/quantizeApi';
@@ -120,6 +119,7 @@ function buildSingleFormData(
 
 function QuantizeDashboardPage() {
   const navigate = useNavigate();
+  const loadingBars = [0, 1, 2, 3, 4, 5, 6, 7];
 
   const [singleForm, setSingleForm] = useState<SingleFormState>({
     file: null,
@@ -212,52 +212,11 @@ function QuantizeDashboardPage() {
       const shouldHandleAsFile = singleForm.responseMode === 'file' || !isJsonResponse(response);
 
       if (shouldHandleAsFile) {
-        try {
-          const blob = await response.blob();
-          const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
-          triggerDownload(blob, filename);
-          setMessage('Render WAV descargado correctamente.');
-          return;
-        } catch (binaryReadError) {
-          if (singleForm.responseMode !== 'file') {
-            throw binaryReadError;
-          }
-
-          const fallbackFormData = buildSingleFormData(singleForm, 'json');
-          const fallbackResponse = await quantizeSingle(fallbackFormData);
-
-          if (!fallbackResponse.ok) {
-            throw new Error(await readErrorFromResponse(fallbackResponse));
-          }
-
-          if (!isJsonResponse(fallbackResponse)) {
-            throw binaryReadError;
-          }
-
-          const fallbackJson = (await fallbackResponse.json()) as Record<string, unknown>;
-          setSingleResult(fallbackJson);
-
-          const fallbackDownloadPath = fallbackJson.downloadPath;
-          if (typeof fallbackDownloadPath === 'string' && fallbackDownloadPath.trim()) {
-            const downloadResponse = await downloadQuantizeOutput(fallbackDownloadPath);
-
-            if (!downloadResponse.ok) {
-              throw new Error(await readErrorFromResponse(downloadResponse));
-            }
-
-            const fallbackBlob = await downloadResponse.blob();
-            const fallbackFilename = getFilenameFromHeaders(
-              downloadResponse,
-              `${singleForm.file.name}-quantized.wav`,
-            );
-            triggerDownload(fallbackBlob, fallbackFilename);
-            setMessage('Render WAV descargado por ruta de fallback (/quantize/output).');
-            return;
-          }
-
-          setMessage('Cuantizacion completada en modo JSON (sin downloadPath disponible).');
-          return;
-        }
+        const blob = await response.blob();
+        const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
+        triggerDownload(blob, filename);
+        setMessage('Render WAV descargado correctamente.');
+        return;
       }
 
       const json = (await response.json()) as Record<string, unknown>;
@@ -436,6 +395,18 @@ function QuantizeDashboardPage() {
           </button>
         </form>
 
+        {singleLoading && (
+          <div className="processing-indicator" role="status" aria-live="polite">
+            <div className="processing-topline" />
+            <div className="processing-wave">
+              {loadingBars.map((bar) => (
+                <span key={`single-bar-${bar}`} className="processing-bar" />
+              ))}
+            </div>
+            <p>Cuantizando track... no cierres esta ventana.</p>
+          </div>
+        )}
+
         {singleDownloadPath && (
           <p className="download-link-row">
             Descarga render: <a href={singleDownloadPath} target="_blank" rel="noreferrer">{singleDownloadPath}</a>
@@ -531,6 +502,18 @@ function QuantizeDashboardPage() {
             {batchLoading ? 'Procesando...' : 'Ejecutar batch'}
           </button>
         </form>
+
+        {batchLoading && (
+          <div className="processing-indicator" role="status" aria-live="polite">
+            <div className="processing-topline" />
+            <div className="processing-wave">
+              {loadingBars.map((bar) => (
+                <span key={`batch-bar-${bar}`} className="processing-bar" />
+              ))}
+            </div>
+            <p>Procesando batch... esto puede tardar un poco mas.</p>
+          </div>
+        )}
 
         {batchResult && <pre>{JSON.stringify(batchResult, null, 2)}</pre>}
       </section>
