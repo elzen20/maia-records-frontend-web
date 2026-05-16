@@ -206,7 +206,10 @@ function QuantizeDashboardPage() {
       const response = await quantizeSingle(formData);
 
       if (!response.ok) {
+        console.error('Error en la respuesta del servidor:', response);
         throw new Error(await readErrorFromResponse(response));
+      } else {
+        console.log('Respuesta del servidor:', response);
       }
 
       const shouldHandleAsFile = singleForm.responseMode === 'file' || !isJsonResponse(response);
@@ -220,6 +223,7 @@ function QuantizeDashboardPage() {
       }
 
       const json = (await response.json()) as Record<string, unknown>;
+      console.log('Respuesta JSON recibida:', json);
       setSingleResult(json);
       setMessage('Cuantizacion individual completada.');
     } catch (requestError) {
@@ -273,7 +277,10 @@ function QuantizeDashboardPage() {
       const response = await quantizeBatch(formData);
 
       if (!response.ok) {
+        console.error('Error en la respuesta del servidor:', response);
         throw new Error(await readErrorFromResponse(response));
+      } else {
+        console.log('Respuesta del servidor:', response);
       }
 
       const shouldHandleAsZip = batchForm.responseMode === 'zip' || !isJsonResponse(response);
@@ -287,6 +294,7 @@ function QuantizeDashboardPage() {
       }
 
       const json = (await response.json()) as Record<string, unknown>;
+      console.log('Respuesta JSON recibida:', json);
       setBatchResult(json);
       setMessage('Proceso batch completado.');
     } catch (requestError) {
