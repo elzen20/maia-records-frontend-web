@@ -64,6 +64,40 @@ function appendIfValue(formData: FormData, key: string, value: string): void {
   }
 }
 
+function isJsonResponse(response: Response): boolean {
+  const contentType = (response.headers.get('content-type') || '').toLowerCase();
+  return contentType.includes('application/json') || contentType.includes('+json');
+}
+
+async function readErrorFromResponse(response: Response): Promise<string> {
+  try {
+    if (isJsonResponse(response)) {
+      const data = (await response.json()) as Record<string, unknown>;
+      if (typeof data.message === 'string' && data.message.trim()) {
+        return data.message;
+      }
+      return JSON.stringify(data);
+    }
+
+    const text = await response.text();
+    return text.trim() || `HTTP ${response.status}`;
+  } catch {
+    return `HTTP ${response.status}`;
+  }
+}
+
+function formatRequestError(error: unknown): string {
+  if (error instanceof TypeError) {
+    return 'No se pudo leer la respuesta del servidor (red/CORS/SSL o respuesta binaria incompleta).';
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 function QuantizeDashboardPage() {
   const navigate = useNavigate();
 
@@ -159,10 +193,12 @@ function QuantizeDashboardPage() {
       const response = await quantizeSingle(formData);
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await readErrorFromResponse(response));
       }
 
-      if (singleForm.responseMode === 'file') {
+      const shouldHandleAsFile = singleForm.responseMode === 'file' || !isJsonResponse(response);
+
+      if (shouldHandleAsFile) {
         const blob = await response.blob();
         const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
         triggerDownload(blob, filename);
@@ -174,7 +210,7 @@ function QuantizeDashboardPage() {
       setSingleResult(json);
       setMessage('Cuantizacion individual completada.');
     } catch (requestError) {
-      setError(`Error en /quantize: ${String(requestError)}`);
+      setError(`Error en /quantize: ${formatRequestError(requestError)}`);
     } finally {
       setSingleLoading(false);
     }
@@ -224,10 +260,12 @@ function QuantizeDashboardPage() {
       const response = await quantizeBatch(formData);
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await readErrorFromResponse(response));
       }
 
-      if (batchForm.responseMode === 'zip') {
+      const shouldHandleAsZip = batchForm.responseMode === 'zip' || !isJsonResponse(response);
+
+      if (shouldHandleAsZip) {
         const blob = await response.blob();
         const filename = getFilenameFromHeaders(response, 'quantize-batch.zip');
         triggerDownload(blob, filename);
@@ -239,7 +277,7 @@ function QuantizeDashboardPage() {
       setBatchResult(json);
       setMessage('Proceso batch completado.');
     } catch (requestError) {
-      setError(`Error en /quantize/batch: ${String(requestError)}`);
+      setError(`Error en /quantize/batch: ${formatRequestError(requestError)}`);
     } finally {
       setBatchLoading(false);
     }
@@ -254,12 +292,12 @@ function QuantizeDashboardPage() {
       const response = await cleanupQuantizeUploads();
 
       if (!response.ok) {
-        throw new Error(await response.text());
+        throw new Error(await readErrorFromResponse(response));
       }
 
       setMessage('Cleanup ejecutado correctamente.');
     } catch (requestError) {
-      setError(`Error en /quantize/cleanup: ${String(requestError)}`);
+      setError(`Error en /quantize/cleanup: ${formatRequestError(requestError)}`);
     } finally {
       setCleanupLoading(false);
     }
