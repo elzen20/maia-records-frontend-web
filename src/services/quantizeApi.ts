@@ -5,6 +5,7 @@ export interface QuantizeFileItem {
   objectName?: string;
   name?: string;
   filename?: string;
+  kind?: string;
   signedUrl?: string;
   sizeBytes?: number | string;
   size?: number | string;

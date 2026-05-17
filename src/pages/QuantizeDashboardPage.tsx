@@ -20,6 +20,8 @@ interface SingleFormState {
   file: File | null;
   strength: string;
   gridSubdivision: string;
+  forceBpm: string;
+  forceGridSubdivision: string;
   autoSubdivision: boolean;
   timeSignature: string;
   renderAudio: boolean;
@@ -39,14 +41,20 @@ interface BatchFormState {
   useReferenceTrack: boolean;
 }
 
-interface TemporaryQuantizeFileRow {
-  objectName: string;
-  displayName: string;
-  sizeLabel: string;
-  updatedLabel: string;
-  expirationLabel: string;
+type CloudFile = {
+  name: string;
+  size: number;
+  updated: string | null;
+  kind: 'original' | 'quantized' | 'other';
   signedUrl?: string;
-}
+};
+
+type ComparisonItem = {
+  trackKey: string;
+  original?: CloudFile;
+  quantized?: CloudFile;
+  status: 'complete' | 'missing-original' | 'missing-quantized';
+};
 
 interface AudioCompareSource {
   label: string;
@@ -59,6 +67,18 @@ interface WaveformPreviewCardProps {
   title: string;
   color: string;
   source: AudioCompareSource | null;
+  gridSec?: number[];
+  quantizedEvents?: number[];
+}
+
+interface QuantizationDetailSummary {
+  detectedBpm: string;
+  effectiveBpm: string;
+  gridSubdivision: string;
+  quantizeStrength: string;
+  bpmForced: boolean;
+  gridSec: number[];
+  quantizedEvents: number[];
 }
 
 function getFilenameFromHeaders(response: Response, fallback: string): string {
@@ -135,6 +155,8 @@ function buildSingleFormData(
   formData.append('audio', state.file);
   appendIfValue(formData, 'strength', state.strength);
   appendIfValue(formData, 'gridSubdivision', state.gridSubdivision);
+  appendIfValue(formData, 'forceBpm', state.forceBpm);
+  appendIfValue(formData, 'forceGridSubdivision', state.forceGridSubdivision);
   appendIfValue(formData, 'timeSignature', state.timeSignature);
   formData.append('autoSubdivision', booleanAsText(state.autoSubdivision));
   formData.append('renderAudio', booleanAsText(state.renderAudio));
@@ -224,6 +246,182 @@ function formatSizeLabel(sizeBytes: number | null): string {
   return `${(sizeBytes / 1024 / 1024).toFixed(2)} MB`;
 }
 
+function parseDate(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+
+function firstNumber(...values: unknown[]): number | null {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return value;
+    }
+
+    if (typeof value === 'string' && value.trim()) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractNumberArray(value: unknown): number[] {
+  const candidate =
+    Array.isArray(value)
+      ? value
+      : isRecord(value)
+        ? (value.quantized_onset_seg ?? value.grid_sec ?? value.gridSec ?? value.values ?? value.items ?? [])
+        : [];
+
+  if (!Array.isArray(candidate)) {
+    return [];
+  }
+
+  return candidate
+    .map((entry) => {
+      if (typeof entry === 'number' && Number.isFinite(entry)) {
+        return entry;
+      }
+
+      if (typeof entry === 'string' && entry.trim()) {
+        const parsed = Number(entry);
+        return Number.isFinite(parsed) ? parsed : null;
+      }
+
+      if (isRecord(entry)) {
+        return firstNumber(entry.time, entry.timeSec, entry.sec, entry.second, entry.at, entry.timestamp, entry.t);
+      }
+
+      return null;
+    })
+    .filter((entry): entry is number => typeof entry === 'number');
+}
+
+function normalizeTrackKey(fileName: string): string {
+  if (fileName.startsWith('originals/')) {
+    return fileName.slice('originals/'.length);
+  }
+
+  if (fileName.startsWith('quantized/')) {
+    return fileName.slice('quantized/'.length).replace(/\.quantized\.wav$/i, '.wav');
+  }
+
+  return fileName;
+}
+
+function normalizeCloudFileKind(fileName: string, inputKind?: unknown): CloudFile['kind'] {
+  const normalizedKind = typeof inputKind === 'string' ? inputKind.trim().toLowerCase() : '';
+
+  if (normalizedKind === 'original' || normalizedKind === 'quantized' || normalizedKind === 'other') {
+    return normalizedKind;
+  }
+
+  if (fileName.startsWith('originals/')) {
+    return 'original';
+  }
+
+  if (fileName.startsWith('quantized/')) {
+    return 'quantized';
+  }
+
+  return 'other';
+}
+
+function groupCloudFiles(files: CloudFile[]): ComparisonItem[] {
+  const grouped = new Map<string, ComparisonItem>();
+
+  for (const file of files) {
+    if (file.kind === 'other') {
+      continue;
+    }
+
+    const trackKey = normalizeTrackKey(file.name);
+    const existing = grouped.get(trackKey) || { trackKey, status: 'missing-quantized' as const };
+
+    if (file.kind === 'original') {
+      existing.original = file;
+    } else if (file.kind === 'quantized') {
+      existing.quantized = file;
+    }
+
+    if (existing.original && existing.quantized) {
+      existing.status = 'complete';
+    } else if (existing.original) {
+      existing.status = 'missing-quantized';
+    } else if (existing.quantized) {
+      existing.status = 'missing-original';
+    }
+
+    grouped.set(trackKey, existing);
+  }
+
+  return Array.from(grouped.values()).sort((left, right) => {
+    const leftUpdated = Math.max(parseDate(left.original?.updated), parseDate(left.quantized?.updated));
+    const rightUpdated = Math.max(parseDate(right.original?.updated), parseDate(right.quantized?.updated));
+    return rightUpdated - leftUpdated || left.trackKey.localeCompare(right.trackKey);
+  });
+}
+
+function readQuantizationDetailSummary(payload: Record<string, unknown>): QuantizationDetailSummary {
+  const source = isRecord(payload.data) ? payload.data : payload;
+  const analysis = isRecord(source.analysis) ? source.analysis : source;
+  const analysisDetails = isRecord(analysis.analysis) ? analysis.analysis : analysis;
+  const timing = isRecord(analysis.timing) ? analysis.timing : {};
+  const quantizedEventsValue = isRecord(timing.quantized_events)
+    ? timing.quantized_events.quantized_onset_seg ?? timing.quantized_events.quantizedOnsetSeg ?? timing.quantized_events
+    : timing.quantized_events ?? source.quantized_events ?? source.quantizedEvents;
+
+  return {
+    detectedBpm:
+      firstString(
+        analysisDetails.detected_bpm,
+        analysisDetails.detectedBpm,
+        source.detected_bpm,
+        source.detectedBpm,
+      ) || 'N/D',
+    effectiveBpm:
+      firstString(
+        analysisDetails.effective_bpm,
+        analysisDetails.effectiveBpm,
+        source.effective_bpm,
+        source.effectiveBpm,
+      ) || 'N/D',
+    gridSubdivision:
+      firstString(
+        analysisDetails.grid_subdivision,
+        analysisDetails.gridSubdivision,
+        source.grid_subdivision,
+        source.gridSubdivision,
+      ) || 'N/D',
+    quantizeStrength: firstString(source.quantize_strength, source.quantizeStrength, source.strength) || 'N/D',
+    bpmForced: Boolean(source.forceBpm || source.force_bpm || analysisDetails.forceBpm || analysisDetails.force_bpm),
+    gridSec: extractNumberArray(timing.grid_sec ?? timing.gridSec ?? source.grid_sec ?? source.gridSec),
+    quantizedEvents: extractNumberArray(quantizedEventsValue),
+  };
+}
+
+function formatWaveMarkerLabel(value: number): string {
+  return `${value.toFixed(3)}s`;
+}
+
+function getRelativeMarkerPercentages(markers: number[], durationSec: number): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return [];
+  }
+
+  return markers
+    .map((marker) => (marker / durationSec) * 100)
+    .filter((marker) => Number.isFinite(marker) && marker >= 0 && marker <= 100);
+}
+
 function extractTemporaryFileItems(payload: unknown): QuantizeFileItem[] {
   if (Array.isArray(payload)) {
     return payload as QuantizeFileItem[];
@@ -237,25 +435,29 @@ function extractTemporaryFileItems(payload: unknown): QuantizeFileItem[] {
   return Array.isArray(candidate) ? (candidate as QuantizeFileItem[]) : [];
 }
 
-function normalizeTemporaryFiles(payload: unknown): TemporaryQuantizeFileRow[] {
+function normalizeCloudFiles(payload: unknown): CloudFile[] {
   const rawFiles = extractTemporaryFileItems(payload);
 
-  return rawFiles.map((item, index) => {
-    const objectName = firstString(item.objectName, item.name, item.filename, `file-${index + 1}`);
-    const displayName = firstString(item.name, item.filename, item.objectName, objectName);
-    const sizeBytes = toNumber(item.sizeBytes ?? item.size);
-    const updatedAt = firstString(item.updatedAt, item.updated);
-    const signedUrl = firstString(item.signedUrl);
+  return rawFiles
+    .map((item, index) => {
+      const name = firstString(item.name, item.objectName, item.filename, `file-${index + 1}`);
+      const updated = firstString(item.updatedAt, item.updated) || null;
+      const size = toNumber(item.sizeBytes ?? item.size) ?? 0;
+      const kind = normalizeCloudFileKind(name, item.kind);
 
-    return {
-      objectName,
-      displayName,
-      sizeLabel: formatSizeLabel(sizeBytes),
-      updatedLabel: formatDateLabel(updatedAt),
-      expirationLabel: formatExpirationLabel(updatedAt, firstString(item.expiresAt) || undefined),
-      signedUrl: signedUrl || undefined,
-    };
-  });
+      return {
+        name,
+        size,
+        updated,
+        kind,
+        signedUrl: firstString(item.signedUrl) || undefined,
+      };
+    })
+    .filter((file) => file.kind === 'original' || file.kind === 'quantized' || file.kind === 'other');
+}
+
+function groupCloudFilesFromPayload(payload: unknown): ComparisonItem[] {
+  return groupCloudFiles(normalizeCloudFiles(payload));
 }
 
 function downloadUrl(url: string): void {
@@ -341,6 +543,98 @@ function extractQuantizedAudioUrl(payload: Record<string, unknown>): string {
   }
 }
 
+function extractCloudStorageUrl(entry: unknown): string {
+  if (typeof entry === 'string') {
+    return entry.trim();
+  }
+
+  if (!isRecord(entry)) {
+    return '';
+  }
+
+  return firstString(
+    entry.signedUrl,
+    entry.url,
+    entry.downloadUrl,
+    entry.publicUrl,
+    entry.objectUrl,
+    entry.path,
+    entry.name,
+  );
+}
+
+function extractCloudStorageName(entry: unknown): string {
+  if (typeof entry === 'string') {
+    return entry.trim();
+  }
+
+  if (!isRecord(entry)) {
+    return '';
+  }
+
+  return firstString(entry.objectName, entry.name, entry.filename, entry.path, entry.storageName);
+}
+
+function extractQuantizedResponseSources(payload: Record<string, unknown>): {
+  original?: AudioCompareSource;
+  quantized?: AudioCompareSource;
+} {
+  const source = isRecord(payload.data) ? payload.data : payload;
+  const fileEntry = isRecord(source.file) ? source.file : source;
+  const outputEntry = isRecord(source.output) ? source.output : source;
+
+  const originalCloudStorage = fileEntry.cloudStorage ?? fileEntry.storage ?? source.file;
+  const quantizedCloudStorage = outputEntry.cloudStorage ?? outputEntry.storage ?? source.output;
+
+  const originalObjectName = extractCloudStorageName(originalCloudStorage);
+  const quantizedObjectName = extractCloudStorageName(quantizedCloudStorage);
+
+  const originalUrl = extractCloudStorageUrl(originalCloudStorage);
+  const quantizedUrl = extractCloudStorageUrl(quantizedCloudStorage);
+
+  return {
+    original: originalUrl
+      ? {
+          label: originalObjectName || 'Original',
+          url: originalUrl,
+        }
+      : undefined,
+    quantized: quantizedUrl
+      ? {
+          label: quantizedObjectName || 'Quantized',
+          url: quantizedUrl,
+        }
+      : undefined,
+  };
+}
+
+async function fetchCloudFileBlobWithRetry(resolveUrl: () => Promise<string>): Promise<Blob> {
+  const fetchBlob = async (url: string): Promise<Response> => fetch(url, { method: 'GET' });
+
+  const attempt = async () => {
+    const url = await resolveUrl();
+    const response = await fetchBlob(url);
+
+    if (response.ok) {
+      return response.blob();
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      const refreshedUrl = await resolveUrl();
+      const refreshedResponse = await fetchBlob(refreshedUrl);
+      if (refreshedResponse.ok) {
+        return refreshedResponse.blob();
+      }
+
+      throw new Error(await readErrorFromResponse(refreshedResponse));
+    }
+
+    throw new Error(await readErrorFromResponse(response));
+  };
+
+  return attempt();
+}
+
 function buildWaveformPeaks(audioBuffer: AudioBuffer, barsCount: number): number[] {
   const channelCount = audioBuffer.numberOfChannels;
   const channelData = Array.from({ length: channelCount }, (_, index) => audioBuffer.getChannelData(index));
@@ -382,7 +676,7 @@ function formatAudioDuration(seconds: number): string {
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 }
 
-function WaveformPreviewCard({ title, color, source }: WaveformPreviewCardProps) {
+function WaveformPreviewCard({ title, color, source, gridSec, quantizedEvents }: WaveformPreviewCardProps) {
   const [loading, setLoading] = useState(false);
   const [waveError, setWaveError] = useState('');
   const [peaks, setPeaks] = useState<number[]>([]);
@@ -390,6 +684,8 @@ function WaveformPreviewCard({ title, color, source }: WaveformPreviewCardProps)
   const [sampleRate, setSampleRate] = useState(0);
   const [channels, setChannels] = useState(0);
   const [sizeBytes, setSizeBytes] = useState(0);
+  const gridMarkerPositions = getRelativeMarkerPercentages(gridSec || [], durationSec);
+  const eventMarkerPositions = getRelativeMarkerPercentages(quantizedEvents || [], durationSec);
 
   useEffect(() => {
     let cancelled = false;
@@ -472,6 +768,25 @@ function WaveformPreviewCard({ title, color, source }: WaveformPreviewCardProps)
               </div>
 
               <div className="wave-bars-grid" role="img" aria-label={`Forma de onda ${title}`}>
+                <div className="wave-markers-grid">
+                  {gridMarkerPositions.map((marker, index) => (
+                    <span
+                      key={`${title}-grid-${index}`}
+                      className="wave-marker wave-marker-grid"
+                      style={{ left: `${marker}%` }}
+                      title={`grid_sec ${formatWaveMarkerLabel((gridSec || [])[index] || 0)}`}
+                    />
+                  ))}
+                  {eventMarkerPositions.map((marker, index) => (
+                    <span
+                      key={`${title}-event-${index}`}
+                      className="wave-marker wave-marker-event"
+                      style={{ left: `${marker}%` }}
+                      title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
+                    />
+                  ))}
+                </div>
+
                 {peaks.map((peak, index) => (
                   <span
                     key={`${title}-wave-${index}`}
@@ -500,6 +815,8 @@ function QuantizeDashboardPage() {
     file: null,
     strength: '',
     gridSubdivision: '',
+    forceBpm: '',
+    forceGridSubdivision: '',
     autoSubdivision: true,
     timeSignature: '',
     renderAudio: true,
@@ -522,51 +839,70 @@ function QuantizeDashboardPage() {
   const [singleLoading, setSingleLoading] = useState(false);
   const [batchLoading, setBatchLoading] = useState(false);
   const [cleanupLoading, setCleanupLoading] = useState(false);
-  const [temporaryFiles, setTemporaryFiles] = useState<TemporaryQuantizeFileRow[]>([]);
-  const [temporaryFilesLoading, setTemporaryFilesLoading] = useState(false);
-  const [temporaryFilesError, setTemporaryFilesError] = useState('');
+  const [cloudFiles, setCloudFiles] = useState<CloudFile[]>([]);
+  const [cloudFilesLoading, setCloudFilesLoading] = useState(false);
+  const [cloudFilesError, setCloudFilesError] = useState('');
+  const [gcsConfigured, setGcsConfigured] = useState<boolean | null>(null);
   const [temporaryFileDownloading, setTemporaryFileDownloading] = useState('');
 
   const [singleResult, setSingleResult] = useState<Record<string, unknown> | null>(null);
   const [batchResult, setBatchResult] = useState<Record<string, unknown> | null>(null);
+  const [latestQuantizationResult, setLatestQuantizationResult] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [beforeAudio, setBeforeAudio] = useState<AudioCompareSource | null>(null);
   const [afterAudio, setAfterAudio] = useState<AudioCompareSource | null>(null);
+  const comparisonItems = useMemo(() => groupCloudFiles(cloudFiles), [cloudFiles]);
+  const quantizationSummary = useMemo(
+    () => (latestQuantizationResult ? readQuantizationDetailSummary(latestQuantizationResult) : null),
+    [latestQuantizationResult],
+  );
 
   const currentEmail = auth.currentUser?.email || 'admin';
 
   useEffect(() => {
     let cancelled = false;
 
-    const loadTemporaryFiles = async () => {
-      setTemporaryFilesLoading(true);
-      setTemporaryFilesError('');
+    const loadCloudFiles = async () => {
+      setCloudFilesLoading(true);
+      setCloudFilesError('');
 
       try {
-        const response = await listQuantizeFiles(20);
+        const response = await listQuantizeFiles(50);
 
         if (!response.ok) {
-          throw new Error(await readErrorFromResponse(response));
+          const errorMessage = await readErrorFromResponse(response);
+          if (!cancelled) {
+            setGcsConfigured(!/gcs_bucket is not configured/i.test(errorMessage));
+          }
+          throw new Error(errorMessage);
         }
 
         const payload = await response.json();
 
         if (!cancelled) {
-          setTemporaryFiles(normalizeTemporaryFiles(payload));
+          setGcsConfigured(
+            isRecord(payload) && typeof payload.gcsConfigured === 'boolean' ? payload.gcsConfigured : true,
+          );
+          setCloudFiles(normalizeCloudFiles(payload));
         }
       } catch (requestError) {
         if (!cancelled) {
-          setTemporaryFilesError(`Error cargando archivos temporales: ${formatRequestError(requestError)}`);
+          const messageText = formatRequestError(requestError);
+          setCloudFilesError(messageText);
+          if (/gcs_bucket is not configured/i.test(messageText)) {
+            setGcsConfigured(false);
+            setCloudFilesError('');
+          }
         }
       } finally {
         if (!cancelled) {
-          setTemporaryFilesLoading(false);
+          setCloudFilesLoading(false);
         }
       }
     };
 
-    loadTemporaryFiles();
+    loadCloudFiles();
 
     return () => {
       cancelled = true;
@@ -625,9 +961,15 @@ function QuantizeDashboardPage() {
     setBatchForm((prev) => ({ ...prev, reference }));
   };
 
+  const cacheTemporaryFileSignedUrl = (name: string, signedUrl: string) => {
+    setCloudFiles((previousFiles) =>
+      previousFiles.map((previousFile) => (previousFile.name === name ? { ...previousFile, signedUrl } : previousFile)),
+    );
+  };
+
   const refreshTemporaryFiles = async () => {
     try {
-      const response = await listQuantizeFiles(20);
+      const response = await listQuantizeFiles(50);
 
       if (!response.ok) {
         console.error('Error refrescando archivos temporales:', response);
@@ -635,52 +977,109 @@ function QuantizeDashboardPage() {
       }
 
       const payload = await response.json();
-      setTemporaryFiles(normalizeTemporaryFiles(payload));
+      setCloudFiles(normalizeCloudFiles(payload));
+      setGcsConfigured(isRecord(payload) && typeof payload.gcsConfigured === 'boolean' ? payload.gcsConfigured : true);
     } catch (error) {
       console.error('Error al refrescar archivos temporales:', error);
     }
   };
 
-  const handleTemporaryFileDownload = async (file: TemporaryQuantizeFileRow) => {
-    setTemporaryFilesError('');
-    setTemporaryFileDownloading(file.objectName);
+  const resolveTemporaryFileUrl = async (file: CloudFile): Promise<string> => {
+    if (file.signedUrl) {
+      return file.signedUrl;
+    }
 
-    try {
-      let signedUrl = file.signedUrl;
+    const requestSignedUrl = async () => {
+      const response = await getQuantizeSignedUrl(file.name);
 
-      if (!signedUrl) {
-        const response = await getQuantizeSignedUrl(file.objectName);
-
-        if (!response.ok) {
-          throw new Error(await readErrorFromResponse(response));
-        }
-
-        const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        if (contentType.includes('application/json') || contentType.includes('+json')) {
-          signedUrl = readSignedUrlFromPayload(await response.json());
-        } else {
-          signedUrl = (await response.text()).trim();
-        }
-
-        if (!signedUrl) {
-          throw new Error('El backend no devolvió una signed URL válida.');
-        }
-
-        setTemporaryFiles((previousFiles) =>
-          previousFiles.map((previousFile) =>
-            previousFile.objectName === file.objectName
-              ? { ...previousFile, signedUrl }
-              : previousFile,
-          ),
-        );
+      if (!response.ok) {
+        throw new Error(await readErrorFromResponse(response));
       }
 
-      downloadUrl(signedUrl);
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      if (contentType.includes('application/json') || contentType.includes('+json')) {
+        return readSignedUrlFromPayload(await response.json());
+      }
+
+      return (await response.text()).trim();
+    };
+
+    let signedUrl = await requestSignedUrl();
+
+    if (!signedUrl) {
+      throw new Error('El backend no devolvió una signed URL válida.');
+    }
+
+    cacheTemporaryFileSignedUrl(file.name, signedUrl);
+    return signedUrl;
+  };
+
+  const handleTemporaryFileDownload = async (file: CloudFile) => {
+    setCloudFilesError('');
+    setTemporaryFileDownloading(file.name);
+
+    try {
+      const blob = await fetchCloudFileBlobWithRetry(() => resolveTemporaryFileUrl(file));
+      triggerDownload(blob, file.name.split('/').pop() || file.name);
     } catch (requestError) {
-      setTemporaryFilesError(`Error descargando ${file.displayName}: ${formatRequestError(requestError)}`);
+      setCloudFilesError(`Error descargando ${file.name}: ${formatRequestError(requestError)}`);
     } finally {
       setTemporaryFileDownloading('');
     }
+  };
+
+  const handleTemporaryFilePlay = async (file: CloudFile) => {
+    setCloudFilesError('');
+    setTemporaryFileDownloading(file.name);
+
+    try {
+      const blob = await fetchCloudFileBlobWithRetry(() => resolveTemporaryFileUrl(file));
+      const blobUrl = URL.createObjectURL(blob);
+      const audio = new Audio(blobUrl);
+      await audio.play();
+      audio.addEventListener('ended', () => URL.revokeObjectURL(blobUrl), { once: true });
+    } catch (requestError) {
+      setCloudFilesError(`Error reproduciendo ${file.name}: ${formatRequestError(requestError)}`);
+    } finally {
+      setTemporaryFileDownloading('');
+    }
+  };
+
+  const renderCloudFileCell = (label: string, file: CloudFile | undefined, accentClassName: string) => {
+    if (!file) {
+      return <p className="cloud-file-empty">No disponible</p>;
+    }
+
+    const audioSource = file.signedUrl || '';
+
+    return (
+      <div className={`cloud-file-card ${accentClassName}`}>
+        <p className="cloud-file-kind">{label}</p>
+        <p className="cloud-file-name">{file.name}</p>
+        <p className="cloud-file-meta">{formatSizeLabel(file.size)} · {formatDateLabel(file.updated || '')}</p>
+        <p className="cloud-file-meta cloud-file-meta-muted">{file.kind}</p>
+        <div className="cloud-file-audio-wrap">
+          <audio controls preload="none" src={audioSource || undefined} />
+          <div className="cloud-file-wave-placeholder">Waveform preparado para reutilizar aquí.</div>
+        </div>
+        <div className="cloud-file-actions">
+          <button
+            type="button"
+            onClick={() => handleTemporaryFilePlay(file)}
+            disabled={temporaryFileDownloading === file.name}
+          >
+            Reproducir
+          </button>
+          <button
+            type="button"
+            onClick={() => handleTemporaryFileDownload(file)}
+            disabled={temporaryFileDownloading === file.name}
+          >
+            Descargar
+          </button>
+        </div>
+      </div>
+    );
   };
 
   const submitSingle = async (event: FormEvent<HTMLFormElement>) => {
@@ -733,15 +1132,19 @@ function QuantizeDashboardPage() {
         const json = (await response.json()) as Record<string, unknown>;
         console.log('Respuesta JSON recibida:', json);
         setSingleResult(json);
-        const quantizedAudioUrl = extractQuantizedAudioUrl(json);
-        if (quantizedAudioUrl) {
+        setLatestQuantizationResult(json);
+
+        const responseSources = extractQuantizedResponseSources(json);
+        if (responseSources.original) {
+          setBeforeAudio((previous) => {
+            revokeObjectUrlIfNeeded(previous);
+            return responseSources.original || null;
+          });
+        }
+        if (responseSources.quantized) {
           setAfterAudio((previous) => {
             revokeObjectUrlIfNeeded(previous);
-            return {
-              label: 'Render cuantizado',
-              url: quantizedAudioUrl,
-              revokeUrlOnCleanup: false,
-            };
+            return responseSources.quantized || null;
           });
         }
         setMessage('Cuantizacion individual completada.');
@@ -819,6 +1222,7 @@ function QuantizeDashboardPage() {
       const json = (await response.json()) as Record<string, unknown>;
       console.log('Respuesta JSON recibida:', json);
       setBatchResult(json);
+      setLatestQuantizationResult(json);
       setMessage('Proceso batch completado.');
       await refreshTemporaryFiles();
     } catch (requestError) {
@@ -883,6 +1287,24 @@ function QuantizeDashboardPage() {
             onChange={(event) => setSingleForm((prev) => ({ ...prev, gridSubdivision: event.target.value }))}
             placeholder="ej. 16"
           />
+
+          <label htmlFor="single-force-bpm">forceBpm (opcional)</label>
+          <input
+            id="single-force-bpm"
+            value={singleForm.forceBpm}
+            onChange={(event) => setSingleForm((prev) => ({ ...prev, forceBpm: event.target.value }))}
+            placeholder="fija el BPM usado para construir la rejilla"
+          />
+          <p className="field-help">forceBpm: fija el BPM usado para construir la rejilla.</p>
+
+          <label htmlFor="single-force-grid">forceGridSubdivision (opcional)</label>
+          <input
+            id="single-force-grid"
+            value={singleForm.forceGridSubdivision}
+            onChange={(event) => setSingleForm((prev) => ({ ...prev, forceGridSubdivision: event.target.value }))}
+            placeholder="fija la subdivisión y evita auto-detección"
+          />
+          <p className="field-help">forceGridSubdivision: fija la subdivisión de la rejilla y evita auto-detección.</p>
 
           <label htmlFor="single-signature">timeSignature (opcional)</label>
           <input
@@ -952,9 +1374,56 @@ function QuantizeDashboardPage() {
         <h2>Comparacion de ondas - Antes vs Despues</h2>
         <p>Vista de detalle WAV para comparar el audio original y el cuantizado.</p>
 
+        {quantizationSummary && (
+          <div className="quantization-detail-grid">
+            <div>
+              <span>detected_bpm</span>
+              <strong>{quantizationSummary.detectedBpm}</strong>
+            </div>
+            <div>
+              <span>effective_bpm</span>
+              <strong>{quantizationSummary.effectiveBpm}</strong>
+            </div>
+            <div>
+              <span>grid_subdivision</span>
+              <strong>{quantizationSummary.gridSubdivision}</strong>
+            </div>
+            <div>
+              <span>quantize_strength</span>
+              <strong>{quantizationSummary.quantizeStrength}</strong>
+            </div>
+            <div>
+              <span>analysis mode</span>
+              <strong className={quantizationSummary.bpmForced ? 'detail-badge detail-badge-forced' : 'detail-badge'}>
+                {quantizationSummary.bpmForced ? 'BPM forced' : 'quantized by rhythmic analysis'}
+              </strong>
+            </div>
+            <div>
+              <span>grid_sec</span>
+              <strong>{quantizationSummary.gridSec.length} marcadores</strong>
+            </div>
+            <div>
+              <span>quantized_events</span>
+              <strong>{quantizationSummary.quantizedEvents.length} eventos</strong>
+            </div>
+          </div>
+        )}
+
         <div className="waveform-compare-grid">
-          <WaveformPreviewCard title="Antes" color="#ff3ecf" source={beforeAudio} />
-          <WaveformPreviewCard title="Despues" color="#b026ff" source={afterAudio} />
+          <WaveformPreviewCard
+            title="Antes"
+            color="#ff3ecf"
+            source={beforeAudio}
+            gridSec={quantizationSummary?.gridSec}
+            quantizedEvents={quantizationSummary?.quantizedEvents}
+          />
+          <WaveformPreviewCard
+            title="Despues"
+            color="#b026ff"
+            source={afterAudio}
+            gridSec={quantizationSummary?.gridSec}
+            quantizedEvents={quantizationSummary?.quantizedEvents}
+          />
         </div>
       </section>
 
@@ -1069,49 +1538,41 @@ function QuantizeDashboardPage() {
       </section>
 
       <section className="quantize-panel temp-files-panel">
-        <h2>Archivos temporales en la nube</h2>
+        <h2>Comparación Before / After</h2>
         <p>Los archivos se eliminan automáticamente después de 24 horas.</p>
 
-        {temporaryFilesLoading && <p className="section-state">Cargando archivos temporales...</p>}
+        {gcsConfigured === false && <p className="section-state">GCS no está configurado todavía. Cuando se habilite, aquí aparecerán los pares de audio.</p>}
+        {gcsConfigured !== false && cloudFilesLoading && <p className="section-state">Cargando archivos en la nube...</p>}
+        {gcsConfigured !== false && !cloudFilesLoading && cloudFilesError && <p className="status-error">{cloudFilesError}</p>}
 
-        {!temporaryFilesLoading && temporaryFilesError && <p className="status-error">{temporaryFilesError}</p>}
-
-        {!temporaryFilesLoading && !temporaryFilesError && temporaryFiles.length === 0 && (
-          <p className="section-state empty-state">No hay archivos temporales disponibles.</p>
+        {gcsConfigured !== false && !cloudFilesLoading && !cloudFilesError && comparisonItems.length === 0 && (
+          <p className="section-state empty-state">No hay archivos disponibles.</p>
         )}
 
-        {!temporaryFilesLoading && !temporaryFilesError && temporaryFiles.length > 0 && (
-          <div className="temp-files-table-wrap">
-            <table className="temp-files-table">
-              <thead>
-                <tr>
-                  <th>Nombre</th>
-                  <th>Tamaño</th>
-                  <th>Updated</th>
-                  <th>Expiración (24h)</th>
-                  <th>Descargar</th>
-                </tr>
-              </thead>
-              <tbody>
-                {temporaryFiles.map((file) => (
-                  <tr key={file.objectName}>
-                    <td>{file.displayName}</td>
-                    <td>{file.sizeLabel}</td>
-                    <td>{file.updatedLabel}</td>
-                    <td>{file.expirationLabel}</td>
-                    <td>
-                      <button
-                        type="button"
-                        onClick={() => handleTemporaryFileDownload(file)}
-                        disabled={temporaryFileDownloading === file.objectName}
-                      >
-                        {temporaryFileDownloading === file.objectName ? 'Abriendo...' : 'Descargar'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+        {gcsConfigured !== false && !cloudFilesLoading && !cloudFilesError && comparisonItems.length > 0 && (
+          <div className="cloud-files-list">
+            {comparisonItems.map((item) => (
+              <article key={item.trackKey} className="cloud-file-group">
+                <div className="cloud-file-group-header">
+                  <div>
+                    <p className="cloud-file-group-label">trackName</p>
+                    <h3>{item.trackKey}</h3>
+                  </div>
+                  <span className={`cloud-file-group-badge cloud-file-group-badge-${item.status}`}>
+                    {item.status === 'complete' ? 'Complete' : 'Pending pair'}
+                  </span>
+                </div>
+
+                <div className="cloud-file-columns">
+                  <div className="cloud-file-column">
+                    {renderCloudFileCell('Original', item.original, 'cloud-file-original')}
+                  </div>
+                  <div className="cloud-file-column">
+                    {renderCloudFileCell('Quantized', item.quantized, 'cloud-file-quantized')}
+                  </div>
+                </div>
+              </article>
+            ))}
           </div>
         )}
       </section>
