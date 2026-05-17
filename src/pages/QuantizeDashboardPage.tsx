@@ -48,6 +48,19 @@ interface TemporaryQuantizeFileRow {
   signedUrl?: string;
 }
 
+interface AudioCompareSource {
+  label: string;
+  url: string;
+  sizeBytes?: number;
+  revokeUrlOnCleanup?: boolean;
+}
+
+interface WaveformPreviewCardProps {
+  title: string;
+  color: string;
+  source: AudioCompareSource | null;
+}
+
 function getFilenameFromHeaders(response: Response, fallback: string): string {
   const disposition = response.headers.get('content-disposition') || '';
   const match = disposition.match(/filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
@@ -275,6 +288,210 @@ function readSignedUrlFromPayload(payload: unknown): string {
   return firstString(payload.signedUrl, payload.url, payload.downloadUrl, payload.data);
 }
 
+function revokeObjectUrlIfNeeded(source: AudioCompareSource | null): void {
+  if (source?.revokeUrlOnCleanup) {
+    URL.revokeObjectURL(source.url);
+  }
+}
+
+function extractQuantizedAudioUrl(payload: Record<string, unknown>): string {
+  if (isRecord(payload.data)) {
+    const nestedUrl = firstString(
+      payload.data.signedUrl,
+      payload.data.url,
+      payload.data.downloadUrl,
+      payload.data.downloadPath,
+      payload.data.outputUrl,
+    );
+    if (nestedUrl) {
+      if (nestedUrl.startsWith('/')) {
+        try {
+          return buildOutputDownloadUrl(nestedUrl);
+        } catch {
+          return '';
+        }
+      }
+
+      return nestedUrl;
+    }
+  }
+
+  const directUrl = firstString(
+    payload.signedUrl,
+    payload.url,
+    payload.downloadUrl,
+    payload.outputUrl,
+    payload.renderUrl,
+  );
+
+  if (directUrl) {
+    return directUrl;
+  }
+
+  const downloadPath = firstString(payload.downloadPath, payload.outputPath, payload.path);
+
+  if (!downloadPath || !downloadPath.startsWith('/')) {
+    return '';
+  }
+
+  try {
+    return buildOutputDownloadUrl(downloadPath);
+  } catch {
+    return '';
+  }
+}
+
+function buildWaveformPeaks(audioBuffer: AudioBuffer, barsCount: number): number[] {
+  const channelCount = audioBuffer.numberOfChannels;
+  const channelData = Array.from({ length: channelCount }, (_, index) => audioBuffer.getChannelData(index));
+  const samplesPerBar = Math.max(1, Math.floor(audioBuffer.length / barsCount));
+  const peaks: number[] = [];
+
+  for (let bar = 0; bar < barsCount; bar += 1) {
+    const start = bar * samplesPerBar;
+    const end = Math.min(audioBuffer.length, start + samplesPerBar);
+    let peak = 0;
+
+    for (let sampleIndex = start; sampleIndex < end; sampleIndex += 1) {
+      let mixedSample = 0;
+      for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+        mixedSample += channelData[channelIndex][sampleIndex] || 0;
+      }
+
+      mixedSample /= channelCount;
+      const absolute = Math.abs(mixedSample);
+      if (absolute > peak) {
+        peak = absolute;
+      }
+    }
+
+    peaks.push(Math.min(1, peak));
+  }
+
+  return peaks;
+}
+
+function formatAudioDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 'N/D';
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
+function WaveformPreviewCard({ title, color, source }: WaveformPreviewCardProps) {
+  const [loading, setLoading] = useState(false);
+  const [waveError, setWaveError] = useState('');
+  const [peaks, setPeaks] = useState<number[]>([]);
+  const [durationSec, setDurationSec] = useState(0);
+  const [sampleRate, setSampleRate] = useState(0);
+  const [channels, setChannels] = useState(0);
+  const [sizeBytes, setSizeBytes] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadWaveform = async () => {
+      if (!source) {
+        setPeaks([]);
+        setWaveError('');
+        setDurationSec(0);
+        setSampleRate(0);
+        setChannels(0);
+        setSizeBytes(0);
+        return;
+      }
+
+      setLoading(true);
+      setWaveError('');
+
+      try {
+        const response = await fetch(source.url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const rawBuffer = await response.arrayBuffer();
+        const AudioContextCtor = window.AudioContext;
+        if (!AudioContextCtor) {
+          throw new Error('AudioContext no esta disponible en este navegador.');
+        }
+
+        const audioContext = new AudioContextCtor();
+        const audioBuffer = await audioContext.decodeAudioData(rawBuffer.slice(0));
+        await audioContext.close();
+
+        if (!cancelled) {
+          setPeaks(buildWaveformPeaks(audioBuffer, 180));
+          setDurationSec(audioBuffer.duration);
+          setSampleRate(audioBuffer.sampleRate);
+          setChannels(audioBuffer.numberOfChannels);
+          setSizeBytes(source.sizeBytes || rawBuffer.byteLength);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setWaveError(formatRequestError(error));
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    loadWaveform();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [source]);
+
+  return (
+    <article className="wave-preview-card" style={{ ['--wave-accent' as string]: color }}>
+      <h3>{title}</h3>
+
+      {!source && <p className="wave-placeholder">Carga y cuantiza un WAV para ver la comparacion.</p>}
+
+      {source && (
+        <>
+          <p className="wave-filename">{source.label}</p>
+
+          {loading && <p className="section-state">Analizando onda...</p>}
+          {!loading && waveError && <p className="status-error">No se pudo dibujar la onda: {waveError}</p>}
+
+          {!loading && !waveError && peaks.length > 0 && (
+            <>
+              <div className="wave-meta-grid">
+                <span>Duracion: {formatAudioDuration(durationSec)}</span>
+                <span>Sample rate: {sampleRate || 'N/D'} Hz</span>
+                <span>Canales: {channels || 'N/D'}</span>
+                <span>Tamano: {formatSizeLabel(sizeBytes || null)}</span>
+              </div>
+
+              <div className="wave-bars-grid" role="img" aria-label={`Forma de onda ${title}`}>
+                {peaks.map((peak, index) => (
+                  <span
+                    key={`${title}-wave-${index}`}
+                    className="wave-bar"
+                    style={{
+                      height: `${Math.max(6, Math.round(peak * 100))}%`,
+                      background: color,
+                      boxShadow: `0 0 10px ${color}`,
+                    }}
+                  />
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </article>
+  );
+}
+
 function QuantizeDashboardPage() {
   const navigate = useNavigate();
   const loadingBars = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -314,6 +531,8 @@ function QuantizeDashboardPage() {
   const [batchResult, setBatchResult] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [beforeAudio, setBeforeAudio] = useState<AudioCompareSource | null>(null);
+  const [afterAudio, setAfterAudio] = useState<AudioCompareSource | null>(null);
 
   const currentEmail = auth.currentUser?.email || 'admin';
 
@@ -354,6 +573,11 @@ function QuantizeDashboardPage() {
     };
   }, []);
 
+  useEffect(() => () => {
+    revokeObjectUrlIfNeeded(beforeAudio);
+    revokeObjectUrlIfNeeded(afterAudio);
+  }, [beforeAudio, afterAudio]);
+
   const singleDownloadPath = useMemo(() => {
     if (!singleResult || typeof singleResult.downloadPath !== 'string') {
       return '';
@@ -374,6 +598,21 @@ function QuantizeDashboardPage() {
   const onSingleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] || null;
     setSingleForm((prev) => ({ ...prev, file }));
+
+    setBeforeAudio((previous) => {
+      revokeObjectUrlIfNeeded(previous);
+
+      if (!file) {
+        return null;
+      }
+
+      return {
+        label: file.name,
+        url: URL.createObjectURL(file),
+        sizeBytes: file.size,
+        revokeUrlOnCleanup: true,
+      };
+    });
   };
 
   const onBatchTracksChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -384,6 +623,22 @@ function QuantizeDashboardPage() {
   const onBatchReferenceChange = (event: ChangeEvent<HTMLInputElement>) => {
     const reference = event.target.files?.[0] || null;
     setBatchForm((prev) => ({ ...prev, reference }));
+  };
+
+  const refreshTemporaryFiles = async () => {
+    try {
+      const response = await listQuantizeFiles(20);
+
+      if (!response.ok) {
+        console.error('Error refrescando archivos temporales:', response);
+        return;
+      }
+
+      const payload = await response.json();
+      setTemporaryFiles(normalizeTemporaryFiles(payload));
+    } catch (error) {
+      console.error('Error al refrescar archivos temporales:', error);
+    }
   };
 
   const handleTemporaryFileDownload = async (file: TemporaryQuantizeFileRow) => {
@@ -433,6 +688,10 @@ function QuantizeDashboardPage() {
     setError('');
     setMessage('');
     setSingleResult(null);
+    setAfterAudio((previous) => {
+      revokeObjectUrlIfNeeded(previous);
+      return null;
+    });
 
     if (!singleForm.file) {
       setError('Selecciona un archivo en el campo audio.');
@@ -457,14 +716,36 @@ function QuantizeDashboardPage() {
       if (contentType.includes('audio/wav')) {
         const blob = await response.blob();
         const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
+        setAfterAudio((previous) => {
+          revokeObjectUrlIfNeeded(previous);
+          return {
+            label: filename,
+            url: URL.createObjectURL(blob),
+            sizeBytes: blob.size,
+            revokeUrlOnCleanup: true,
+          };
+        });
         triggerDownload(blob, filename);
         setMessage('Render WAV descargado correctamente.');
+        await refreshTemporaryFiles();
         return;
       } else if (isJsonResponse(response)) {
         const json = (await response.json()) as Record<string, unknown>;
         console.log('Respuesta JSON recibida:', json);
         setSingleResult(json);
+        const quantizedAudioUrl = extractQuantizedAudioUrl(json);
+        if (quantizedAudioUrl) {
+          setAfterAudio((previous) => {
+            revokeObjectUrlIfNeeded(previous);
+            return {
+              label: 'Render cuantizado',
+              url: quantizedAudioUrl,
+              revokeUrlOnCleanup: false,
+            };
+          });
+        }
         setMessage('Cuantizacion individual completada.');
+        await refreshTemporaryFiles();
       } else {
         throw new Error('Tipo de respuesta desconocido o no soportado.');
       }
@@ -539,6 +820,7 @@ function QuantizeDashboardPage() {
       console.log('Respuesta JSON recibida:', json);
       setBatchResult(json);
       setMessage('Proceso batch completado.');
+      await refreshTemporaryFiles();
     } catch (requestError) {
       setError(`Error en /quantize/batch: ${formatRequestError(requestError)}`);
     } finally {
@@ -664,6 +946,16 @@ function QuantizeDashboardPage() {
         )}
 
         {singleResult && <pre>{JSON.stringify(singleResult, null, 2)}</pre>}
+      </section>
+
+      <section className="quantize-panel waveform-compare-panel">
+        <h2>Comparacion de ondas - Antes vs Despues</h2>
+        <p>Vista de detalle WAV para comparar el audio original y el cuantizado.</p>
+
+        <div className="waveform-compare-grid">
+          <WaveformPreviewCard title="Antes" color="#ff3ecf" source={beforeAudio} />
+          <WaveformPreviewCard title="Despues" color="#b026ff" source={afterAudio} />
+        </div>
       </section>
 
       <section className="quantize-panel">

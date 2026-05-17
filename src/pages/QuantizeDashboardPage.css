@@ -136,6 +136,75 @@
   min-width: 110px;
 }
 
+.waveform-compare-panel p {
+  margin-bottom: 10px;
+}
+
+.waveform-compare-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+
+.wave-preview-card {
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 12px;
+  padding: 12px;
+  background: radial-gradient(circle at top left, rgba(148, 163, 184, 0.12), rgba(2, 6, 23, 0.3));
+}
+
+.wave-preview-card h3 {
+  margin-bottom: 6px;
+}
+
+.wave-filename {
+  color: #dbeafe;
+  margin-bottom: 8px;
+  word-break: break-all;
+}
+
+.wave-placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.wave-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 10px;
+  margin-bottom: 10px;
+  font-size: 0.86rem;
+  color: #cbd5e1;
+}
+
+.wave-bars-grid {
+  height: 150px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  padding: 10px;
+  display: grid;
+  grid-template-columns: repeat(180, minmax(1px, 1fr));
+  align-items: end;
+  gap: 1px;
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.45), rgba(2, 6, 23, 0.65)),
+    repeating-linear-gradient(
+      90deg,
+      rgba(148, 163, 184, 0.08) 0,
+      rgba(148, 163, 184, 0.08) 1px,
+      transparent 1px,
+      transparent 8px
+    );
+  overflow: hidden;
+}
+
+.wave-bar {
+  display: block;
+  width: 100%;
+  border-radius: 999px 999px 0 0;
+  opacity: 0.95;
+}
+
 .processing-indicator {
   margin-top: 12px;
   padding: 12px;
@@ -247,6 +316,10 @@
   .quantize-form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     column-gap: 14px;
+  }
+
+  .waveform-compare-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .quantize-form-grid button,
