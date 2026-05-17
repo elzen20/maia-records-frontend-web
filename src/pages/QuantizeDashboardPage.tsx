@@ -1,4 +1,4 @@
-import React, { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import React, { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
@@ -67,11 +67,16 @@ interface WaveformPreviewCardProps {
   title: string;
   color: string;
   source: AudioCompareSource | null;
+  comparisonLabel: string;
+  playerId: string;
   gridSec?: number[];
   quantizedEvents?: number[];
+  detectedBpm?: string;
+  effectiveBpm?: string;
+  timeSignature?: string;
+  gridSubdivision?: string;
   zoomLevel: number;
-  cursorRatio?: number;
-  onCursorRatioChange?: (ratio: number) => void;
+  onZoomChange?: (zoom: number) => void;
   onDurationMeasured?: (durationSec: number) => void;
 }
 
@@ -79,6 +84,7 @@ interface QuantizationDetailSummary {
   detectedBpm: string;
   effectiveBpm: string;
   gridSubdivision: string;
+  timeSignature: string;
   quantizeStrength: string;
   bpmForced: boolean;
   gridSec: number[];
@@ -277,6 +283,73 @@ function firstNumber(...values: unknown[]): number | null {
   return null;
 }
 
+function parseTimeSignature(value: string): { beatsPerBar: number; beatUnit: number } | null {
+  const match = value.trim().match(/^(\d+)\s*\/\s*(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const beatsPerBar = Number(match[1]);
+  const beatUnit = Number(match[2]);
+
+  if (!Number.isFinite(beatsPerBar) || beatsPerBar <= 0 || !Number.isFinite(beatUnit) || beatUnit <= 0) {
+    return null;
+  }
+
+  return { beatsPerBar, beatUnit };
+}
+
+function formatMusicalGridLabel(bpm: string, signature: string, subdivision: string): string {
+  const bpmLabel = bpm.trim() ? `${bpm.trim()} BPM` : 'BPM N/D';
+  const signatureLabel = signature.trim() ? signature.trim() : 'compás N/D';
+  const subdivisionLabel = subdivision.trim() ? `subdiv ${subdivision.trim()}` : 'subdiv N/D';
+  return `${bpmLabel} · ${signatureLabel} · ${subdivisionLabel}`;
+}
+
+function buildBeatMarkerPercentages(durationSec: number, bpmText: string): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return [];
+  }
+
+  const bpm = firstNumber(bpmText);
+  if (!bpm || bpm <= 0) {
+    return [];
+  }
+
+  const beatDurationSec = 60 / bpm;
+  const epsilon = beatDurationSec * 0.15;
+  const markers: number[] = [];
+
+  for (let time = 0; time <= durationSec + epsilon; time += beatDurationSec) {
+    markers.push((time / durationSec) * 100);
+  }
+
+  return Array.from(new Set(markers.map((marker) => Number(marker.toFixed(3))))).sort((left, right) => left - right);
+}
+
+function buildBarMarkerPercentages(durationSec: number, bpmText: string, timeSignatureText: string): number[] {
+  if (!Number.isFinite(durationSec) || durationSec <= 0) {
+    return [];
+  }
+
+  const bpm = firstNumber(bpmText);
+  if (!bpm || bpm <= 0) {
+    return [];
+  }
+
+  const beatDurationSec = 60 / bpm;
+  const beatsPerBar = parseTimeSignature(timeSignatureText)?.beatsPerBar || 4;
+  const barDurationSec = beatDurationSec * beatsPerBar;
+  const epsilon = barDurationSec * 0.15;
+  const markers: number[] = [];
+
+  for (let time = 0; time <= durationSec + epsilon; time += barDurationSec) {
+    markers.push((time / durationSec) * 100);
+  }
+
+  return Array.from(new Set(markers.map((marker) => Number(marker.toFixed(3))))).sort((left, right) => left - right);
+}
+
 function extractNumberArray(value: unknown): number[] {
   const candidate =
     Array.isArray(value)
@@ -404,6 +477,13 @@ function readQuantizationDetailSummary(payload: Record<string, unknown>): Quanti
         analysisDetails.gridSubdivision,
         source.grid_subdivision,
         source.gridSubdivision,
+      ) || 'N/D',
+    timeSignature:
+      firstString(
+        analysisDetails.time_signature,
+        analysisDetails.timeSignature,
+        source.time_signature,
+        source.timeSignature,
       ) || 'N/D',
     quantizeStrength: firstString(source.quantize_strength, source.quantizeStrength, source.strength) || 'N/D',
     bpmForced: Boolean(source.forceBpm || source.force_bpm || analysisDetails.forceBpm || analysisDetails.force_bpm),
@@ -598,6 +678,42 @@ function buildWaveformPeaks(audioBuffer: AudioBuffer, barsCount: number): number
   return peaks;
 }
 
+function buildWaveformPath(peaks: number[]): string {
+  if (peaks.length === 0) {
+    return '';
+  }
+
+  const width = 1000;
+  const height = 200;
+  const centerY = height / 2;
+  const step = peaks.length > 1 ? width / (peaks.length - 1) : width;
+  const upperPoints = peaks.map((peak, index) => `${(index * step).toFixed(2)},${(centerY - peak * centerY).toFixed(2)}`);
+  const lowerPoints = peaks
+    .slice()
+    .reverse()
+    .map((peak, index) => `${(width - index * step).toFixed(2)},${(centerY + peak * centerY).toFixed(2)}`);
+
+  return [`M 0 ${centerY.toFixed(2)}`, ...upperPoints.map((point) => `L ${point}`), ...lowerPoints.map((point) => `L ${point}`), 'Z'].join(' ');
+}
+
+type ActivePlaybackHandle = {
+  id: string;
+  pause: () => void;
+};
+
+let activePlaybackHandle: ActivePlaybackHandle | null = null;
+
+function formatClockTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '0:00';
+  }
+
+  const totalSeconds = Math.floor(seconds);
+  const minutes = Math.floor(totalSeconds / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
 function formatAudioDuration(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds <= 0) {
     return 'N/D';
@@ -613,11 +729,16 @@ function WaveformPreviewCard({
   title,
   color,
   source,
+  comparisonLabel,
+  playerId,
   gridSec,
   quantizedEvents,
+  detectedBpm,
+  effectiveBpm,
+  timeSignature,
+  gridSubdivision,
   zoomLevel,
-  cursorRatio,
-  onCursorRatioChange,
+  onZoomChange,
   onDurationMeasured,
 }: WaveformPreviewCardProps) {
   const [loading, setLoading] = useState(false);
@@ -627,47 +748,297 @@ function WaveformPreviewCard({
   const [sampleRate, setSampleRate] = useState(0);
   const [channels, setChannels] = useState(0);
   const [sizeBytes, setSizeBytes] = useState(0);
-  const [cursorDragging, setCursorDragging] = useState(false);
-  const [internalCursorRatio, setInternalCursorRatio] = useState(0.25);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [metronomeEnabled, setMetronomeEnabled] = useState(false);
+
+  // Cursor handled via DOM refs — zero React re-renders during drag
+  const durationSecRef = useRef(0);
+  const cursorWaveRef = useRef<HTMLSpanElement>(null);
+  const cursorMinimapRef = useRef<HTMLSpanElement>(null);
+  const cursorLabelRef = useRef<HTMLSpanElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const metronomeTimerRef = useRef<number | null>(null);
+  const metronomeAudioContextRef = useRef<AudioContext | null>(null);
+  const metronomeBeatRef = useRef(0);
+  const isDraggingWave = useRef(false);
+  const isDraggingMinimap = useRef(false);
+  const waveformBarCount = 240;
+
+  // Waveform scrollable viewport and minimap window indicator
+  const waveViewportRef = useRef<HTMLDivElement>(null);
+  const minimapWindowRef = useRef<HTMLDivElement>(null);
+
   const gridMarkerPositions = getRelativeMarkerPercentages(gridSec || [], durationSec);
   const eventMarkerPositions = getRelativeMarkerPercentages(quantizedEvents || [], durationSec);
-  const enableWaveformRendering = Boolean(source?.url);
-  const timelineWidth = `${Math.max(100, Math.round(zoomLevel * 120))}%`;
-  const activeCursorRatio = typeof cursorRatio === 'number' ? cursorRatio : internalCursorRatio;
+  const waveContentWidth = `${Math.max(100, zoomLevel * 120)}%`;
+  const beatMarkerPositions = buildBeatMarkerPercentages(durationSec, effectiveBpm || detectedBpm || '');
+  const barMarkerPositions = buildBarMarkerPercentages(durationSec, effectiveBpm || detectedBpm || '', timeSignature || '');
+  const musicalGridLabel = formatMusicalGridLabel(effectiveBpm || detectedBpm || '', timeSignature || '', gridSubdivision || '');
+  const comparisonBadgeLabel = comparisonLabel.toLowerCase() === 'original' ? 'Antes' : 'Después';
+  const waveformPath = useMemo(() => buildWaveformPath(peaks), [peaks]);
+  const waveformGradientId = `wave-gradient-${playerId.replace(/[^a-z0-9]+/gi, '-')}`;
+  const playbackPercent = durationSec > 0 ? Math.min(100, Math.max(0, (currentTime / durationSec) * 100)) : 0;
+  const playbackClockLabel = `${formatClockTime(currentTime)} / ${formatClockTime(durationSec)}`;
+  const bpmForMetronome = firstNumber(effectiveBpm || detectedBpm || '');
+  const timeSignatureInfo = parseTimeSignature(timeSignature || '');
+  const beatsPerBar = timeSignatureInfo?.beatsPerBar || 4;
+  const canUseMetronome = Boolean(bpmForMetronome && bpmForMetronome > 0);
 
-  const setCursorRatioValue = (ratio: number) => {
-    if (onCursorRatioChange) {
-      onCursorRatioChange(ratio);
+  const clearMetronome = useCallback(() => {
+    if (metronomeTimerRef.current !== null) {
+      window.clearInterval(metronomeTimerRef.current);
+      metronomeTimerRef.current = null;
+    }
+  }, []);
+
+  const stopMetronome = useCallback(() => {
+    clearMetronome();
+    metronomeBeatRef.current = 0;
+    const context = metronomeAudioContextRef.current;
+    metronomeAudioContextRef.current = null;
+    if (context) {
+      void context.close();
+    }
+  }, [clearMetronome]);
+
+  const playMetronomeClick = useCallback((accent: boolean) => {
+    const bpm = bpmForMetronome;
+    if (!bpm || bpm <= 0) {
       return;
     }
 
-    setInternalCursorRatio(ratio);
+    const AudioContextCtor = window.AudioContext;
+    if (!AudioContextCtor) {
+      return;
+    }
+
+    if (!metronomeAudioContextRef.current) {
+      metronomeAudioContextRef.current = new AudioContextCtor();
+    }
+
+    const context = metronomeAudioContextRef.current;
+    if (!context) {
+      return;
+    }
+
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = accent ? 'square' : 'sine';
+    oscillator.frequency.value = accent ? 1100 : 760;
+    gain.gain.value = accent ? 0.16 : 0.08;
+    oscillator.connect(gain);
+    gain.connect(context.destination);
+    oscillator.start();
+    oscillator.stop(context.currentTime + 0.04);
+  }, [bpmForMetronome]);
+
+  const startMetronome = useCallback(() => {
+    const bpm = bpmForMetronome;
+    if (!metronomeEnabled || !bpm || bpm <= 0) {
+      return;
+    }
+
+    stopMetronome();
+    metronomeBeatRef.current = 0;
+    playMetronomeClick(true);
+    metronomeBeatRef.current += 1;
+
+    const intervalMs = 60000 / bpm;
+    metronomeTimerRef.current = window.setInterval(() => {
+      const beatIndex = metronomeBeatRef.current;
+      playMetronomeClick(beatIndex % beatsPerBar === 0);
+      metronomeBeatRef.current += 1;
+    }, intervalMs);
+  }, [beatsPerBar, bpmForMetronome, metronomeEnabled, playMetronomeClick, stopMetronome]);
+
+  const syncPlaybackPosition = useCallback((timeSec: number) => {
+    const duration = durationSecRef.current;
+    const pct = duration > 0 ? Math.min(1, Math.max(0, timeSec / duration)) : 0;
+    const left = `${pct * 100}%`;
+    if (cursorWaveRef.current) cursorWaveRef.current.style.left = left;
+    if (cursorMinimapRef.current) cursorMinimapRef.current.style.left = left;
+    if (cursorLabelRef.current) {
+      cursorLabelRef.current.textContent = `${formatClockTime(timeSec)} / ${formatClockTime(duration)}`;
+    }
+    setCurrentTime(timeSec);
+  }, []);
+
+  const stopPlayback = useCallback(() => {
+    const audio = audioRef.current;
+    if (audio) {
+      audio.pause();
+      audio.currentTime = 0;
+    }
+    setIsPlaying(false);
+    syncPlaybackPosition(0);
+    stopMetronome();
+    if (activePlaybackHandle?.id === playerId) {
+      activePlaybackHandle = null;
+    }
+  }, [playerId, stopMetronome, syncPlaybackPosition]);
+
+  const togglePlayback = useCallback(async () => {
+    const audio = audioRef.current;
+    if (!audio || !source?.url) {
+      return;
+    }
+
+    if (isPlaying) {
+      audio.pause();
+      return;
+    }
+
+    if (activePlaybackHandle && activePlaybackHandle.id !== playerId) {
+      activePlaybackHandle.pause();
+    }
+
+    try {
+      await audio.play();
+      activePlaybackHandle = {
+        id: playerId,
+        pause: () => {
+          audio.pause();
+        },
+      };
+      setIsPlaying(true);
+    } catch (error) {
+      setWaveError(formatRequestError(error));
+    }
+  }, [isPlaying, playerId, source?.url, startMetronome]);
+
+  useEffect(() => {
+    syncPlaybackPosition(0);
+    setIsPlaying(false);
+    stopMetronome();
+    if (activePlaybackHandle?.id === playerId) {
+      activePlaybackHandle = null;
+    }
+  }, [playerId, source?.url, stopMetronome, syncPlaybackPosition]);
+
+  useEffect(() => {
+    if (!isPlaying) {
+      return;
+    }
+
+    let frameId = 0;
+
+    const handleFrame = () => {
+      const audio = audioRef.current;
+      if (audio) {
+        syncPlaybackPosition(audio.currentTime);
+      }
+      frameId = requestAnimationFrame(handleFrame);
+    };
+
+    frameId = requestAnimationFrame(handleFrame);
+    return () => cancelAnimationFrame(frameId);
+  }, [isPlaying, syncPlaybackPosition]);
+
+  useEffect(() => {
+    return () => {
+      if (activePlaybackHandle?.id === playerId) {
+        activePlaybackHandle = null;
+      }
+      stopMetronome();
+    };
+  }, [playerId, stopMetronome]);
+
+  useEffect(() => { durationSecRef.current = durationSec; }, [durationSec]);
+
+  const applyCursor = (ratio: number) => {
+    const pct = `${ratio * 100}%`;
+    if (cursorWaveRef.current) cursorWaveRef.current.style.left = pct;
+    if (cursorMinimapRef.current) cursorMinimapRef.current.style.left = pct;
+    if (cursorLabelRef.current) {
+      const d = durationSecRef.current;
+      cursorLabelRef.current.textContent = d > 0 ? `${formatClockTime(d * ratio)} / ${formatClockTime(d)}` : `${Math.round(ratio * 100)}%`;
+    }
   };
 
-  const updateCursorFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
-    const viewport = event.currentTarget;
-    const track = viewport.querySelector('.timeline-track') as HTMLElement | null;
-    const trackWidth = track?.getBoundingClientRect().width || viewport.clientWidth || 1;
-    const viewportRect = viewport.getBoundingClientRect();
-    const localX = viewport.scrollLeft + (event.clientX - viewportRect.left);
-    const ratio = Math.min(1, Math.max(0, localX / trackWidth));
-    setCursorRatioValue(ratio);
+  const syncWindow = () => {
+    const vp = waveViewportRef.current;
+    const win = minimapWindowRef.current;
+    if (!vp || !win) return;
+    const content = vp.scrollWidth;
+    const visible = vp.clientWidth;
+    if (content <= visible) { win.style.left = '0%'; win.style.width = '100%'; return; }
+    const frac = visible / content;
+    const scroll = vp.scrollLeft / (content - visible);
+    win.style.left = `${scroll * (1 - frac) * 100}%`;
+    win.style.width = `${frac * 100}%`;
   };
 
-  const cursorSeconds = durationSec > 0 ? durationSec * activeCursorRatio : 0;
-  const cursorTimeLabel = durationSec > 0 ? formatAudioDuration(cursorSeconds) : `${Math.round(activeCursorRatio * 100)}%`;
+  useEffect(() => { requestAnimationFrame(syncWindow); }, [zoomLevel]);
+
+  const handleMinimapClick = (event: React.PointerEvent<HTMLDivElement>) => {
+    // Ignore click if we just finished dragging
+    if (minimapWasDraggedRef.current) {
+      minimapWasDraggedRef.current = false;
+      return;
+    }
+    
+    // Click on minimap to zoom to that section
+    // Zoom such that ~60% of the viewport shows the clicked region
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    const targetZoom = Math.min(4, Math.max(0.5, 1.67)); // Zoom to ~1.67x to show ~60% around click point
+    onZoomChange?.(Number(targetZoom.toFixed(2)));
+    // Pan to center around the clicked point
+    panWaveformTo(Math.max(0, Math.min(1, ratio - 0.3)));
+  };
+
+  const getWaveRatio = (event: React.PointerEvent<HTMLDivElement>) => {
+    const vp = event.currentTarget;
+    const rect = vp.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (vp.scrollLeft + event.clientX - rect.left) / vp.scrollWidth));
+  };
+
+  const getMinimapRatio = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  };
+
+  const panWaveformTo = (ratio: number) => {
+    const vp = waveViewportRef.current;
+    if (!vp) return;
+    const scrollable = vp.scrollWidth - vp.clientWidth;
+    if (scrollable > 0) vp.scrollLeft = ratio * scrollable;
+    syncWindow();
+  };
+
+  const getMinimapZoneInfo = (event: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+    const edgeThreshold = 0.15; // First/last 15% are "border zones"
+    const isLeftEdge = ratio < edgeThreshold;
+    const isRightEdge = ratio > 1 - edgeThreshold;
+    const isBorderZone = isLeftEdge || isRightEdge;
+    return { ratio, isLeftEdge, isRightEdge, isBorderZone };
+  };
+
+  const handleMinimapMouseMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    const { isBorderZone } = getMinimapZoneInfo(event);
+    const elem = event.currentTarget;
+    if (isBorderZone) {
+      elem.style.cursor = 'ew-resize'; // Left-right resize cursor for zoom
+    } else {
+      elem.style.cursor = 'zoom-in'; // Magnifying glass for center zoom
+    }
+  };
+
+  const minimapDragModeRef = useRef<'pan' | 'zoom' | null>(null);
+  const minimapDragStartXRef = useRef(0);
+  const minimapDragInitialZoomRef = useRef(0);
+  const minimapWasDraggedRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
 
     const loadWaveform = async () => {
-      if (!source) {
-        setPeaks([]);
-        setWaveError('');
-        setDurationSec(0);
-        setSampleRate(0);
-        setChannels(0);
-        setSizeBytes(0);
+      if (!source?.url) {
+        setPeaks([]); setWaveError(''); setDurationSec(0);
+        setSampleRate(0); setChannels(0); setSizeBytes(0);
         return;
       }
 
@@ -676,50 +1047,48 @@ function WaveformPreviewCard({
 
       try {
         const response = await fetch(source.url);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const rawBuffer = await response.arrayBuffer();
         const AudioContextCtor = window.AudioContext;
-        if (!AudioContextCtor) {
-          throw new Error('AudioContext no esta disponible en este navegador.');
-        }
+        if (!AudioContextCtor) throw new Error('AudioContext no disponible en este navegador.');
 
         const audioContext = new AudioContextCtor();
         const audioBuffer = await audioContext.decodeAudioData(rawBuffer.slice(0));
         await audioContext.close();
 
         if (!cancelled) {
-          setPeaks(buildWaveformPeaks(audioBuffer, 180));
+          setPeaks(buildWaveformPeaks(audioBuffer, waveformBarCount));
           setDurationSec(audioBuffer.duration);
           setSampleRate(audioBuffer.sampleRate);
           setChannels(audioBuffer.numberOfChannels);
-          setSizeBytes(source.sizeBytes || rawBuffer.byteLength);
+          setSizeBytes(source.sizeBytes ?? rawBuffer.byteLength);
         }
-      } catch (error) {
-        if (!cancelled) {
-          setWaveError(formatRequestError(error));
-        }
+      } catch (err) {
+        if (!cancelled) setWaveError(formatRequestError(err));
       } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
+        if (!cancelled) setLoading(false);
       }
     };
 
     loadWaveform();
 
-    return () => {
-      cancelled = true;
-    };
-  }, [source, enableWaveformRendering]);
+    return () => { cancelled = true; };
+    // source?.url is the only dependency that should trigger re-decode
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source?.url]);
 
   return (
     <article className="wave-preview-card" style={{ ['--wave-accent' as string]: color }}>
       <h3>{title}</h3>
+      <div className="wave-preview-header">
+        <span className={`wave-role-badge ${comparisonLabel.toLowerCase() === 'original' ? 'wave-role-badge-original' : 'wave-role-badge-quantized'}`}>
+          {comparisonBadgeLabel}
+        </span>
+        <span className="wave-grid-summary">{musicalGridLabel}</span>
+      </div>
 
-      {!source && <p className="wave-placeholder">No hay signed URL disponible todavia para este archivo.</p>}
+      {!source && <p className="wave-placeholder">No hay signed URL disponible todavía para este archivo.</p>}
 
       {source && (
         <>
@@ -730,68 +1099,177 @@ function WaveformPreviewCard({
             src={source.url}
             preload="metadata"
             onLoadedMetadata={(event) => {
-              const measuredDuration = event.currentTarget.duration;
-              if (Number.isFinite(measuredDuration) && measuredDuration > 0) {
-                setDurationSec(measuredDuration);
-                onDurationMeasured?.(measuredDuration);
-              }
+              const d = event.currentTarget.duration;
+              if (Number.isFinite(d) && d > 0) { setDurationSec(d); onDurationMeasured?.(d); }
             }}
           />
 
           {loading && <p className="section-state">Analizando onda...</p>}
           {!loading && waveError && <p className="status-error">No se pudo dibujar la onda: {waveError}</p>}
 
-          {!loading && !waveError && peaks.length > 0 && enableWaveformRendering && (
+          {!loading && peaks.length > 0 && (
             <>
+              <audio
+                ref={audioRef}
+                className="wave-metadata-audio"
+                src={source.url}
+                preload="auto"
+                onLoadedMetadata={(event) => {
+                  const d = event.currentTarget.duration;
+                  if (Number.isFinite(d) && d > 0) {
+                    setDurationSec(d);
+                    syncPlaybackPosition(0);
+                    onDurationMeasured?.(d);
+                  }
+                }}
+                onPlay={() => {
+                  setIsPlaying(true);
+                  if (activePlaybackHandle && activePlaybackHandle.id !== playerId) {
+                    activePlaybackHandle.pause();
+                  }
+                  activePlaybackHandle = {
+                    id: playerId,
+                    pause: () => {
+                      const audio = audioRef.current;
+                      if (audio) {
+                        audio.pause();
+                      }
+                    },
+                  };
+                  startMetronome();
+                }}
+                onPause={() => {
+                  setIsPlaying(false);
+                  stopMetronome();
+                  if (activePlaybackHandle?.id === playerId) {
+                    activePlaybackHandle = null;
+                  }
+                }}
+                onTimeUpdate={(event) => syncPlaybackPosition(event.currentTarget.currentTime)}
+                onEnded={() => {
+                  setIsPlaying(false);
+                  stopMetronome();
+                  syncPlaybackPosition(0);
+                  if (activePlaybackHandle?.id === playerId) {
+                    activePlaybackHandle = null;
+                  }
+                }}
+              />
               <div className="wave-meta-grid">
-                <span>Duracion: {formatAudioDuration(durationSec)}</span>
+                <span>Duración: {formatAudioDuration(durationSec)}</span>
                 <span>Sample rate: {sampleRate || 'N/D'} Hz</span>
                 <span>Canales: {channels || 'N/D'}</span>
-                <span>Tamano: {formatSizeLabel(sizeBytes || null)}</span>
+                <span>Tamaño: {formatSizeLabel(sizeBytes || null)}</span>
               </div>
 
-              <div className="wave-bars-grid" role="img" aria-label={`Forma de onda ${title}`}>
-                <div className="wave-markers-grid">
-                  {gridMarkerPositions.map((marker, index) => (
-                    <span
-                      key={`${title}-grid-${index}`}
-                      className="wave-marker wave-marker-grid"
-                      style={{ left: `${marker}%` }}
-                      title={`grid_sec ${formatWaveMarkerLabel((gridSec || [])[index] || 0)}`}
-                    />
-                  ))}
-                  {eventMarkerPositions.map((marker, index) => (
-                    <span
-                      key={`${title}-event-${index}`}
-                      className="wave-marker wave-marker-event"
-                      style={{ left: `${marker}%` }}
-                      title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
-                    />
-                  ))}
-                </div>
+              <div className="wave-playback-controls">
+                <button type="button" className="wave-playback-button" onClick={togglePlayback} disabled={!source?.url}>
+                  {isPlaying ? 'Pausa' : 'Play'}
+                </button>
+                <button
+                  type="button"
+                  className={`wave-metronome-button ${metronomeEnabled ? 'wave-metronome-button-active' : ''}`}
+                  onClick={() => setMetronomeEnabled((previous) => !previous)}
+                  disabled={!canUseMetronome}
+                  title={canUseMetronome ? 'Activa o desactiva el metronomo' : 'Metronomo no disponible sin BPM'}
+                >
+                  {metronomeEnabled ? 'Metronomo ON' : 'Metronomo OFF'}
+                </button>
+                <span className="wave-playback-time">{playbackClockLabel}</span>
+              </div>
 
-                {peaks.map((peak, index) => (
-                  <span
-                    key={`${title}-wave-${index}`}
-                    className="wave-bar"
-                    style={{
-                      height: `${Math.max(6, Math.round(peak * 100))}%`,
-                      background: color,
-                      boxShadow: `0 0 10px ${color}`,
-                    }}
-                  />
-                ))}
+              <div className="wave-playback-track" aria-hidden="true">
+                <div className="wave-playback-track-fill" style={{ width: `${playbackPercent}%` }} />
+              </div>
+
+              {/* Scrollable + zoomable waveform viewport */}
+              <div
+                ref={waveViewportRef}
+                className="wave-viewport-scrollable"
+                onScroll={syncWindow}
+              >
+                <div
+                  className="wave-bars-grid"
+                  style={{ width: waveContentWidth }}
+                  role="img"
+                  aria-label={`Forma de onda ${title}`}
+                >
+                  <div className="wave-markers-grid">
+                    {beatMarkerPositions.map((marker, index) => (
+                      <span
+                        key={`${title}-beat-${index}`}
+                        className="wave-marker wave-marker-beat"
+                        style={{ left: `${marker}%` }}
+                        title={`beat ${index + 1}`}
+                      />
+                    ))}
+                    {barMarkerPositions.map((marker, index) => (
+                      <span
+                        key={`${title}-bar-${index}`}
+                        className="wave-marker wave-marker-bar"
+                        style={{ left: `${marker}%` }}
+                        title={`bar ${index + 1}`}
+                      />
+                    ))}
+                    {gridMarkerPositions.map((marker, index) => (
+                      <span
+                        key={`${title}-grid-${index}`}
+                        className="wave-marker wave-marker-grid"
+                        style={{ left: `${marker}%` }}
+                        title={`grid_sec ${formatWaveMarkerLabel((gridSec || [])[index] || 0)}`}
+                      />
+                    ))}
+                    {eventMarkerPositions.map((marker, index) => (
+                      <span
+                        key={`${title}-event-${index}`}
+                        className="wave-marker wave-marker-event"
+                        style={{ left: `${marker}%` }}
+                        title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
+                      />
+                    ))}
+                    {/* Cursor on zoomed waveform */}
+                    <span ref={cursorWaveRef} className="wave-cursor-line" style={{ left: '0%' }} aria-hidden="true" />
+                  </div>
+
+                  <svg
+                    className="waveform-svg"
+                    viewBox="0 0 1000 200"
+                    preserveAspectRatio="none"
+                    aria-hidden="true"
+                  >
+                    <defs>
+                      <linearGradient id={`wave-gradient-${title.replace(/[^a-z0-9]+/gi, '-')}`} x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor={color} stopOpacity="0.95" />
+                        <stop offset="100%" stopColor={color} stopOpacity="0.22" />
+                      </linearGradient>
+                    </defs>
+                    <path d={waveformPath} fill={`url(#wave-gradient-${title.replace(/[^a-z0-9]+/gi, '-')})`} />
+                    <path d={waveformPath} fill="none" stroke={color} strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" opacity="0.95" />
+                    <line x1="0" y1="100" x2="1000" y2="100" stroke="rgba(255,255,255,0.06)" strokeWidth="2" />
+                  </svg>
+                </div>
               </div>
             </>
           )}
 
+          {/* Minimap strip – always 100% width, drag to pan + wheel to zoom */}
           <div className="timeline-zoom-strip">
             <div className="timeline-zoom-strip-label">
-              <span>zoom x{zoomLevel.toFixed(1)}</span>
-              <span>cursor {cursorTimeLabel}</span>
+              <span>zoom x{zoomLevel.toFixed(1)} · click = zoom · bordes = zoom · centro = pan · grid musical basada en BPM</span>
+              <span ref={cursorLabelRef}>–</span>
             </div>
             <div className="timeline-bar-labels" aria-hidden="true">
-              {gridSec && gridSec.length > 0 ? (
+              {barMarkerPositions.length > 0 ? (
+                barMarkerPositions.map((marker, index) => (
+                  <span
+                    key={`${title}-bar-label-${index}`}
+                    className="timeline-bar-label timeline-bar-label-major"
+                    style={{ left: `${marker}%` }}
+                  >
+                    {`Bar ${index + 1}`}
+                  </span>
+                ))
+              ) : gridSec && gridSec.length > 0 ? (
                 gridSec.map((marker, index) => {
                   const isBar = index % 4 === 0;
                   return (
@@ -808,56 +1286,80 @@ function WaveformPreviewCard({
                 <span className="timeline-bar-label timeline-bar-label-empty">Sin grid detectado</span>
               )}
             </div>
-            <div className="timeline-viewport">
-              <div
-                className={`timeline-track ${cursorDragging ? 'timeline-track-dragging' : ''}`}
-                style={{ width: timelineWidth }}
-                onPointerDown={(event) => {
-                  setCursorDragging(true);
-                  updateCursorFromPointer(event);
-                  event.currentTarget.setPointerCapture(event.pointerId);
-                }}
-                onPointerMove={(event) => {
-                  if (!cursorDragging) {
-                    return;
-                  }
-
-                  updateCursorFromPointer(event);
-                }}
-                onPointerUp={(event) => {
-                  if (cursorDragging) {
-                    updateCursorFromPointer(event);
-                  }
-
-                  setCursorDragging(false);
-                  if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-                    event.currentTarget.releasePointerCapture(event.pointerId);
-                  }
-                }}
-                onPointerCancel={() => setCursorDragging(false)}
-              >
-                {Array.from({ length: 48 }, (_, index) => (
-                  <span key={`${title}-tick-${index}`} className="timeline-tick" style={{ left: `${(index / 47) * 100}%` }} />
-                ))}
-                {gridMarkerPositions.map((marker, index) => (
-                  <span
-                    key={`${title}-grid-timeline-${index}`}
-                    className="timeline-marker timeline-marker-grid"
-                    style={{ left: `${marker}%` }}
-                    title={`grid_sec ${formatWaveMarkerLabel((gridSec || [])[index] || 0)}`}
-                  />
-                ))}
-                {eventMarkerPositions.map((marker, index) => (
-                  <span
-                    key={`${title}-event-timeline-${index}`}
-                    className="timeline-marker timeline-marker-event"
-                    style={{ left: `${marker}%` }}
-                    title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
-                  />
-                ))}
-                <span className="timeline-cursor" style={{ left: `${activeCursorRatio * 100}%` }} aria-hidden="true" />
-                <span className="timeline-cursor-handle" style={{ left: `${activeCursorRatio * 100}%` }} aria-hidden="true" />
-              </div>
+            {/* Minimap: fixed 100%, viewport window indicator shows current zoom/scroll */}
+            <div
+              className="timeline-minimap"
+              onClick={handleMinimapClick}
+              onMouseMove={handleMinimapMouseMove}
+              onPointerDown={(e) => {
+                isDraggingMinimap.current = true;
+                minimapWasDraggedRef.current = false; // Reset drag flag for new interaction
+                const zone = getMinimapZoneInfo(e);
+                minimapDragModeRef.current = zone.isBorderZone ? 'zoom' : 'pan';
+                minimapDragStartXRef.current = e.clientX;
+                minimapDragInitialZoomRef.current = zoomLevel; // Save current zoom level
+                e.currentTarget.setPointerCapture(e.pointerId);
+                applyCursor(zone.ratio);
+              }}
+              onPointerMove={(e) => {
+                if (!isDraggingMinimap.current || !minimapDragModeRef.current) return;
+                const zone = getMinimapZoneInfo(e);
+                const dragDelta = Math.abs(e.clientX - minimapDragStartXRef.current);
+                
+                // Mark as dragged if we've moved at least 3px
+                if (dragDelta > 3) {
+                  minimapWasDraggedRef.current = true;
+                }
+                
+                applyCursor(zone.ratio);
+                if (minimapDragModeRef.current === 'pan') {
+                  panWaveformTo(zone.ratio);
+                } else {
+                  // Zoom mode: proportional to total drag distance (Ableton-style)
+                  const totalDeltaX = e.clientX - minimapDragStartXRef.current;
+                  const sensitivity = 300; // 300px of drag = 1x zoom multiplier
+                  const zoomMultiplier = 1 + totalDeltaX / sensitivity;
+                  const newZoom = Math.min(4, Math.max(0.5, Number((minimapDragInitialZoomRef.current * zoomMultiplier).toFixed(2))));
+                  onZoomChange?.(newZoom);
+                }
+              }}
+              onPointerUp={(e) => {
+                isDraggingMinimap.current = false;
+                minimapDragModeRef.current = null;
+                // If no drag detected, reset flag for next interaction
+                if (!minimapWasDraggedRef.current) {
+                  minimapWasDraggedRef.current = false;
+                }
+                if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+              }}
+              onPointerCancel={() => { 
+                isDraggingMinimap.current = false;
+                minimapDragModeRef.current = null;
+                minimapWasDraggedRef.current = false;
+              }}
+            >
+              {/* Viewport window – updated via ref to avoid re-renders */}
+              <div ref={minimapWindowRef} className="timeline-minimap-window" />
+              {Array.from({ length: 48 }, (_, index) => (
+                <span key={`${title}-tick-${index}`} className="timeline-tick" style={{ left: `${(index / 47) * 100}%` }} />
+              ))}
+              {gridMarkerPositions.map((marker, index) => (
+                <span
+                  key={`${title}-grid-timeline-${index}`}
+                  className="timeline-marker timeline-marker-grid"
+                  style={{ left: `${marker}%` }}
+                  title={`grid_sec ${formatWaveMarkerLabel((gridSec || [])[index] || 0)}`}
+                />
+              ))}
+              {eventMarkerPositions.map((marker, index) => (
+                <span
+                  key={`${title}-event-timeline-${index}`}
+                  className="timeline-marker timeline-marker-event"
+                  style={{ left: `${marker}%` }}
+                  title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
+                />
+              ))}
+              <span ref={cursorMinimapRef} className="timeline-cursor" style={{ left: '0%' }} aria-hidden="true" />
             </div>
           </div>
         </>
@@ -911,8 +1413,6 @@ function QuantizeDashboardPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [comparisonZoom, setComparisonZoom] = useState(1.5);
-  const [comparisonCursorRatio, setComparisonCursorRatio] = useState(0.25);
-  const [comparisonDurationSec, setComparisonDurationSec] = useState(0);
   const comparisonItems = useMemo(() => groupCloudFiles(cloudFiles), [cloudFiles]);
   const quantizationSummary = useMemo(
     () => (latestQuantizationResult ? readQuantizationDetailSummary(latestQuantizationResult) : null),
@@ -920,7 +1420,6 @@ function QuantizeDashboardPage() {
   );
 
   const currentEmail = auth.currentUser?.email || 'admin';
-  const comparisonCursorLabel = comparisonDurationSec > 0 ? formatAudioDuration(comparisonDurationSec * comparisonCursorRatio) : `${Math.round(comparisonCursorRatio * 100)}%`;
 
   useEffect(() => {
     let cancelled = false;
@@ -1096,23 +1595,6 @@ function QuantizeDashboardPage() {
     }
   };
 
-  const handleTemporaryFilePlay = async (file: CloudFile) => {
-    setCloudFilesError('');
-    setTemporaryFileDownloading(file.name);
-
-    try {
-      const blob = await fetchCloudFileBlobWithRetry(() => resolveTemporaryFileUrl(file));
-      const blobUrl = URL.createObjectURL(blob);
-      const audio = new Audio(blobUrl);
-      await audio.play();
-      audio.addEventListener('ended', () => URL.revokeObjectURL(blobUrl), { once: true });
-    } catch (requestError) {
-      setCloudFilesError(`Error reproduciendo ${file.name}: ${formatRequestError(requestError)}`);
-    } finally {
-      setTemporaryFileDownloading('');
-    }
-  };
-
   const renderCloudFileCell = (label: string, file: CloudFile | undefined, accentClassName: string) => {
     if (!file) {
       return <p className="cloud-file-empty">No disponible</p>;
@@ -1127,27 +1609,23 @@ function QuantizeDashboardPage() {
         <p className="cloud-file-meta">{formatSizeLabel(file.size)} · {formatDateLabel(file.updated || '')}</p>
         <p className="cloud-file-meta cloud-file-meta-muted">{file.kind}</p>
         <div className="cloud-file-audio-wrap">
-          <audio controls preload="none" src={audioSource || undefined} />
           <WaveformPreviewCard
             title={`Wave panel ${label}`}
             color={label.toLowerCase() === 'original' ? '#38bdf8' : '#c084fc'}
+            comparisonLabel={label}
+            playerId={`${label}-${file.name}`}
             source={audioSource ? { label: file.name, url: audioSource, sizeBytes: file.size } : null}
             gridSec={quantizationSummary?.gridSec}
             quantizedEvents={quantizationSummary?.quantizedEvents}
+            detectedBpm={quantizationSummary?.detectedBpm}
+            effectiveBpm={quantizationSummary?.effectiveBpm}
+            timeSignature={quantizationSummary?.timeSignature}
+            gridSubdivision={quantizationSummary?.gridSubdivision}
             zoomLevel={comparisonZoom}
-            cursorRatio={comparisonCursorRatio}
-            onCursorRatioChange={setComparisonCursorRatio}
-            onDurationMeasured={(durationSec) => setComparisonDurationSec((current) => Math.max(current, durationSec))}
+            onZoomChange={setComparisonZoom}
           />
         </div>
         <div className="cloud-file-actions">
-          <button
-            type="button"
-            onClick={() => handleTemporaryFilePlay(file)}
-            disabled={temporaryFileDownloading === file.name}
-          >
-            Reproducir
-          </button>
           <button
             type="button"
             onClick={() => handleTemporaryFileDownload(file)}
@@ -1355,7 +1833,7 @@ function QuantizeDashboardPage() {
             onChange={(event) => setSingleForm((prev) => ({ ...prev, forceGridSubdivision: event.target.value }))}
             placeholder="fija la subdivisión y evita auto-detección"
           />
-          <p className="field-help">forceGridSubdivision: fija la subdivisión de la rejilla y evita auto-detección.</p>
+          <p className="field-help">forceGridSubdivision: fija la subdivisión de la rejilla y evita auto-detección. La subdivisión es el valor musical por pulso, por ejemplo 8 o 16; el compás es timeSignature, por ejemplo 4/4 o 3/4.</p>
 
           <label htmlFor="single-signature">timeSignature (opcional)</label>
           <input
@@ -1534,7 +2012,6 @@ function QuantizeDashboardPage() {
       <section className="quantize-panel temp-files-panel">
         <h2>Comparación Before / After</h2>
         <p>Los archivos se eliminan automáticamente después de 24 horas.</p>
-        <p className="section-state comparison-cursor-readout">Cursor actual: {comparisonCursorLabel}</p>
         <div className="comparison-zoom-controls">
           <button type="button" onClick={() => setComparisonZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}>
             Zoom out
