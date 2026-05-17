@@ -90,6 +90,52 @@
   background: rgba(15, 20, 25, 0.75);
 }
 
+.temp-files-panel p {
+  margin-bottom: 10px;
+}
+
+.section-state {
+  color: var(--text-muted);
+}
+
+.empty-state {
+  font-style: italic;
+}
+
+.temp-files-table-wrap {
+  overflow-x: auto;
+  margin-top: 10px;
+}
+
+.temp-files-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.temp-files-table th,
+.temp-files-table td {
+  text-align: left;
+  padding: 12px 10px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+  vertical-align: middle;
+}
+
+.temp-files-table th {
+  color: #cbd5e1;
+  font-size: 0.88rem;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.temp-files-table td {
+  color: var(--text-light);
+}
+
+.temp-files-table button {
+  min-width: 110px;
+}
+
 .processing-indicator {
   margin-top: 12px;
   padding: 12px;
