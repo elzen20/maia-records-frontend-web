@@ -1,4 +1,4 @@
-import React, { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import React, { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { signOut } from 'firebase/auth';
 import { auth } from '../firebase';
@@ -70,12 +70,10 @@ interface WaveformPreviewCardProps {
   gridSec?: number[];
   quantizedEvents?: number[];
   zoomLevel: number;
-  cursorRatio: number;
-  onCursorRatioChange: (ratio: number) => void;
-  onDurationMeasured: (durationSec: number) => void;
+  cursorRatio?: number;
+  onCursorRatioChange?: (ratio: number) => void;
+  onDurationMeasured?: (durationSec: number) => void;
 }
-
-type MetronomeSourceMode = 'effective' | 'detected';
 
 interface QuantizationDetailSummary {
   detectedBpm: string;
@@ -496,12 +494,6 @@ function readSignedUrlFromPayload(payload: unknown): string {
   return firstString(payload.signedUrl, payload.url, payload.downloadUrl, payload.data);
 }
 
-function revokeObjectUrlIfNeeded(source: AudioCompareSource | null): void {
-  if (source?.revokeUrlOnCleanup) {
-    URL.revokeObjectURL(source.url);
-  }
-}
-
 function extractQuantizedAudioUrl(payload: Record<string, unknown>): string {
   if (isRecord(payload.data)) {
     const nestedUrl = firstString(
@@ -547,71 +539,6 @@ function extractQuantizedAudioUrl(payload: Record<string, unknown>): string {
   } catch {
     return '';
   }
-}
-
-function extractCloudStorageUrl(entry: unknown): string {
-  if (typeof entry === 'string') {
-    return entry.trim();
-  }
-
-  if (!isRecord(entry)) {
-    return '';
-  }
-
-  return firstString(
-    entry.signedUrl,
-    entry.url,
-    entry.downloadUrl,
-    entry.publicUrl,
-    entry.objectUrl,
-    entry.path,
-    entry.name,
-  );
-}
-
-function extractCloudStorageName(entry: unknown): string {
-  if (typeof entry === 'string') {
-    return entry.trim();
-  }
-
-  if (!isRecord(entry)) {
-    return '';
-  }
-
-  return firstString(entry.objectName, entry.name, entry.filename, entry.path, entry.storageName);
-}
-
-function extractQuantizedResponseSources(payload: Record<string, unknown>): {
-  original?: AudioCompareSource;
-  quantized?: AudioCompareSource;
-} {
-  const source = isRecord(payload.data) ? payload.data : payload;
-  const fileEntry = isRecord(source.file) ? source.file : source;
-  const outputEntry = isRecord(source.output) ? source.output : source;
-
-  const originalCloudStorage = fileEntry.cloudStorage ?? fileEntry.storage ?? source.file;
-  const quantizedCloudStorage = outputEntry.cloudStorage ?? outputEntry.storage ?? source.output;
-
-  const originalObjectName = extractCloudStorageName(originalCloudStorage);
-  const quantizedObjectName = extractCloudStorageName(quantizedCloudStorage);
-
-  const originalUrl = extractCloudStorageUrl(originalCloudStorage);
-  const quantizedUrl = extractCloudStorageUrl(quantizedCloudStorage);
-
-  return {
-    original: originalUrl
-      ? {
-          label: originalObjectName || 'Original',
-          url: originalUrl,
-        }
-      : undefined,
-    quantized: quantizedUrl
-      ? {
-          label: quantizedObjectName || 'Quantized',
-          url: quantizedUrl,
-        }
-      : undefined,
-  };
 }
 
 async function fetchCloudFileBlobWithRetry(resolveUrl: () => Promise<string>): Promise<Blob> {
@@ -682,20 +609,6 @@ function formatAudioDuration(seconds: number): string {
   return `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
 }
 
-function parseNumericText(value: string | null | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const match = value.match(/-?\d+(?:\.\d+)?/);
-  if (!match) {
-    return null;
-  }
-
-  const parsed = Number(match[0]);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function WaveformPreviewCard({
   title,
   color,
@@ -715,10 +628,21 @@ function WaveformPreviewCard({
   const [channels, setChannels] = useState(0);
   const [sizeBytes, setSizeBytes] = useState(0);
   const [cursorDragging, setCursorDragging] = useState(false);
+  const [internalCursorRatio, setInternalCursorRatio] = useState(0.25);
   const gridMarkerPositions = getRelativeMarkerPercentages(gridSec || [], durationSec);
   const eventMarkerPositions = getRelativeMarkerPercentages(quantizedEvents || [], durationSec);
-  const enableWaveformRendering = false;
+  const enableWaveformRendering = Boolean(source?.url);
   const timelineWidth = `${Math.max(100, Math.round(zoomLevel * 120))}%`;
+  const activeCursorRatio = typeof cursorRatio === 'number' ? cursorRatio : internalCursorRatio;
+
+  const setCursorRatioValue = (ratio: number) => {
+    if (onCursorRatioChange) {
+      onCursorRatioChange(ratio);
+      return;
+    }
+
+    setInternalCursorRatio(ratio);
+  };
 
   const updateCursorFromPointer = (event: React.PointerEvent<HTMLDivElement>) => {
     const viewport = event.currentTarget;
@@ -727,17 +651,17 @@ function WaveformPreviewCard({
     const viewportRect = viewport.getBoundingClientRect();
     const localX = viewport.scrollLeft + (event.clientX - viewportRect.left);
     const ratio = Math.min(1, Math.max(0, localX / trackWidth));
-    onCursorRatioChange(ratio);
+    setCursorRatioValue(ratio);
   };
 
-  const cursorSeconds = durationSec > 0 ? durationSec * cursorRatio : 0;
-  const cursorTimeLabel = durationSec > 0 ? formatAudioDuration(cursorSeconds) : `${Math.round(cursorRatio * 100)}%`;
+  const cursorSeconds = durationSec > 0 ? durationSec * activeCursorRatio : 0;
+  const cursorTimeLabel = durationSec > 0 ? formatAudioDuration(cursorSeconds) : `${Math.round(activeCursorRatio * 100)}%`;
 
   useEffect(() => {
     let cancelled = false;
 
     const loadWaveform = async () => {
-      if (!source || !enableWaveformRendering) {
+      if (!source) {
         setPeaks([]);
         setWaveError('');
         setDurationSec(0);
@@ -795,7 +719,7 @@ function WaveformPreviewCard({
     <article className="wave-preview-card" style={{ ['--wave-accent' as string]: color }}>
       <h3>{title}</h3>
 
-      {!source && <p className="wave-placeholder">Carga y cuantiza un WAV para ver la comparacion.</p>}
+      {!source && <p className="wave-placeholder">No hay signed URL disponible todavia para este archivo.</p>}
 
       {source && (
         <>
@@ -809,7 +733,7 @@ function WaveformPreviewCard({
               const measuredDuration = event.currentTarget.duration;
               if (Number.isFinite(measuredDuration) && measuredDuration > 0) {
                 setDurationSec(measuredDuration);
-                onDurationMeasured(measuredDuration);
+                onDurationMeasured?.(measuredDuration);
               }
             }}
           />
@@ -860,8 +784,6 @@ function WaveformPreviewCard({
               </div>
             </>
           )}
-
-          {!enableWaveformRendering && <div className="cloud-file-wave-placeholder">ComparisonWavePanel preparado para reutilizar aquí.</div>}
 
           <div className="timeline-zoom-strip">
             <div className="timeline-zoom-strip-label">
@@ -933,8 +855,8 @@ function WaveformPreviewCard({
                     title={`quantized_event ${formatWaveMarkerLabel((quantizedEvents || [])[index] || 0)}`}
                   />
                 ))}
-                <span className="timeline-cursor" style={{ left: `${cursorRatio * 100}%` }} aria-hidden="true" />
-                <span className="timeline-cursor-handle" style={{ left: `${cursorRatio * 100}%` }} aria-hidden="true" />
+                <span className="timeline-cursor" style={{ left: `${activeCursorRatio * 100}%` }} aria-hidden="true" />
+                <span className="timeline-cursor-handle" style={{ left: `${activeCursorRatio * 100}%` }} aria-hidden="true" />
               </div>
             </div>
           </div>
@@ -988,17 +910,9 @@ function QuantizeDashboardPage() {
   const [latestQuantizationResult, setLatestQuantizationResult] = useState<Record<string, unknown> | null>(null);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [beforeAudio, setBeforeAudio] = useState<AudioCompareSource | null>(null);
-  const [afterAudio, setAfterAudio] = useState<AudioCompareSource | null>(null);
   const [comparisonZoom, setComparisonZoom] = useState(1.5);
   const [comparisonCursorRatio, setComparisonCursorRatio] = useState(0.25);
   const [comparisonDurationSec, setComparisonDurationSec] = useState(0);
-  const [metronomeEnabled, setMetronomeEnabled] = useState(false);
-  const [metronomeSource, setMetronomeSource] = useState<MetronomeSourceMode>('effective');
-  const [metronomeBeatCount, setMetronomeBeatCount] = useState(0);
-  const [metronomeStatus, setMetronomeStatus] = useState('');
-  const metronomeAudioContextRef = useRef<AudioContext | null>(null);
-  const metronomeBeatIndexRef = useRef(0);
   const comparisonItems = useMemo(() => groupCloudFiles(cloudFiles), [cloudFiles]);
   const quantizationSummary = useMemo(
     () => (latestQuantizationResult ? readQuantizationDetailSummary(latestQuantizationResult) : null),
@@ -1007,110 +921,6 @@ function QuantizeDashboardPage() {
 
   const currentEmail = auth.currentUser?.email || 'admin';
   const comparisonCursorLabel = comparisonDurationSec > 0 ? formatAudioDuration(comparisonDurationSec * comparisonCursorRatio) : `${Math.round(comparisonCursorRatio * 100)}%`;
-  const comparisonDetectedBpm = parseNumericText(quantizationSummary?.detectedBpm);
-  const comparisonEffectiveBpm = parseNumericText(quantizationSummary?.effectiveBpm);
-  const comparisonMetronomeBpm =
-    metronomeSource === 'detected'
-      ? comparisonDetectedBpm ?? comparisonEffectiveBpm
-      : comparisonEffectiveBpm ?? comparisonDetectedBpm;
-  const comparisonMetronomeLabel = comparisonMetronomeBpm ? `${comparisonMetronomeBpm.toFixed(1)} BPM` : 'N/D';
-
-  const playMetronomeClick = (isAccent: boolean) => {
-    const audioContext = metronomeAudioContextRef.current;
-    if (!audioContext) {
-      return;
-    }
-
-    const oscillator = audioContext.createOscillator();
-    const gainNode = audioContext.createGain();
-    const now = audioContext.currentTime;
-
-    oscillator.type = 'square';
-    oscillator.frequency.setValueAtTime(isAccent ? 1320 : 880, now);
-    gainNode.gain.setValueAtTime(0.0001, now);
-    gainNode.gain.exponentialRampToValueAtTime(isAccent ? 0.28 : 0.18, now + 0.004);
-    gainNode.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
-
-    oscillator.connect(gainNode);
-    gainNode.connect(audioContext.destination);
-    oscillator.start(now);
-    oscillator.stop(now + 0.07);
-  };
-
-  const toggleMetronome = async () => {
-    if (metronomeEnabled) {
-      setMetronomeEnabled(false);
-      setMetronomeStatus('');
-      return;
-    }
-
-    if (!comparisonMetronomeBpm || comparisonMetronomeBpm <= 0) {
-      setMetronomeStatus('No hay BPM disponible para arrancar el metrónomo.');
-      return;
-    }
-
-    if (!window.AudioContext) {
-      setMetronomeStatus('Este navegador no soporta AudioContext.');
-      return;
-    }
-
-    if (!metronomeAudioContextRef.current) {
-      metronomeAudioContextRef.current = new window.AudioContext();
-    }
-
-    try {
-      if (metronomeAudioContextRef.current.state === 'suspended') {
-        await metronomeAudioContextRef.current.resume();
-      }
-      metronomeBeatIndexRef.current = 0;
-      setMetronomeBeatCount(0);
-      setMetronomeStatus('');
-      setMetronomeEnabled(true);
-    } catch (error) {
-      setMetronomeStatus(formatRequestError(error));
-    }
-  };
-
-  useEffect(() => {
-    if (!metronomeEnabled) {
-      return;
-    }
-
-    if (!comparisonMetronomeBpm || comparisonMetronomeBpm <= 0) {
-      setMetronomeEnabled(false);
-      setMetronomeStatus('No hay BPM disponible para el metrónomo.');
-      return;
-    }
-
-    const beatIntervalMs = 60000 / comparisonMetronomeBpm;
-    let cancelled = false;
-    let beatIndex = metronomeBeatIndexRef.current;
-
-    const tick = () => {
-      if (cancelled) {
-        return;
-      }
-
-      playMetronomeClick(beatIndex % 4 === 0);
-      beatIndex += 1;
-      metronomeBeatIndexRef.current = beatIndex;
-      setMetronomeBeatCount(beatIndex);
-    };
-
-    tick();
-    const intervalId = window.setInterval(tick, beatIntervalMs);
-
-    return () => {
-      cancelled = true;
-      window.clearInterval(intervalId);
-    };
-  }, [comparisonMetronomeBpm, metronomeEnabled]);
-
-  useEffect(() => {
-    return () => {
-      void metronomeAudioContextRef.current?.close();
-    };
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -1161,11 +971,6 @@ function QuantizeDashboardPage() {
     };
   }, []);
 
-  useEffect(() => () => {
-    revokeObjectUrlIfNeeded(beforeAudio);
-    revokeObjectUrlIfNeeded(afterAudio);
-  }, [beforeAudio, afterAudio]);
-
   const singleDownloadPath = useMemo(() => {
     if (!singleResult || typeof singleResult.downloadPath !== 'string') {
       return '';
@@ -1186,21 +991,6 @@ function QuantizeDashboardPage() {
   const onSingleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] || null;
     setSingleForm((prev) => ({ ...prev, file }));
-
-    setBeforeAudio((previous) => {
-      revokeObjectUrlIfNeeded(previous);
-
-      if (!file) {
-        return null;
-      }
-
-      return {
-        label: file.name,
-        url: URL.createObjectURL(file),
-        sizeBytes: file.size,
-        revokeUrlOnCleanup: true,
-      };
-    });
   };
 
   const onBatchTracksChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1338,7 +1128,17 @@ function QuantizeDashboardPage() {
         <p className="cloud-file-meta cloud-file-meta-muted">{file.kind}</p>
         <div className="cloud-file-audio-wrap">
           <audio controls preload="none" src={audioSource || undefined} />
-          <div className="cloud-file-wave-placeholder">ComparisonWavePanel preparado para reutilizar aquí.</div>
+          <WaveformPreviewCard
+            title={`Wave panel ${label}`}
+            color={label.toLowerCase() === 'original' ? '#38bdf8' : '#c084fc'}
+            source={audioSource ? { label: file.name, url: audioSource, sizeBytes: file.size } : null}
+            gridSec={quantizationSummary?.gridSec}
+            quantizedEvents={quantizationSummary?.quantizedEvents}
+            zoomLevel={comparisonZoom}
+            cursorRatio={comparisonCursorRatio}
+            onCursorRatioChange={setComparisonCursorRatio}
+            onDurationMeasured={(durationSec) => setComparisonDurationSec((current) => Math.max(current, durationSec))}
+          />
         </div>
         <div className="cloud-file-actions">
           <button
@@ -1365,10 +1165,6 @@ function QuantizeDashboardPage() {
     setError('');
     setMessage('');
     setSingleResult(null);
-    setAfterAudio((previous) => {
-      revokeObjectUrlIfNeeded(previous);
-      return null;
-    });
 
     if (!singleForm.file) {
       setError('Selecciona un archivo en el campo audio.');
@@ -1393,15 +1189,6 @@ function QuantizeDashboardPage() {
       if (contentType.includes('audio/wav')) {
         const blob = await response.blob();
         const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
-        setAfterAudio((previous) => {
-          revokeObjectUrlIfNeeded(previous);
-          return {
-            label: filename,
-            url: URL.createObjectURL(blob),
-            sizeBytes: blob.size,
-            revokeUrlOnCleanup: true,
-          };
-        });
         triggerDownload(blob, filename);
         setMessage('Render WAV descargado correctamente.');
         await refreshTemporaryFiles();
@@ -1411,20 +1198,6 @@ function QuantizeDashboardPage() {
         console.log('Respuesta JSON recibida:', json);
         setSingleResult(json);
         setLatestQuantizationResult(json);
-
-        const responseSources = extractQuantizedResponseSources(json);
-        if (responseSources.original) {
-          setBeforeAudio((previous) => {
-            revokeObjectUrlIfNeeded(previous);
-            return responseSources.original || null;
-          });
-        }
-        if (responseSources.quantized) {
-          setAfterAudio((previous) => {
-            revokeObjectUrlIfNeeded(previous);
-            return responseSources.quantized || null;
-          });
-        }
         setMessage('Cuantizacion individual completada.');
         await refreshTemporaryFiles();
       } else {
@@ -1648,118 +1421,6 @@ function QuantizeDashboardPage() {
         {singleResult && <pre>{JSON.stringify(singleResult, null, 2)}</pre>}
       </section>
 
-      <section className="quantize-panel waveform-compare-panel">
-        <h2>Comparacion de ondas - Antes vs Despues</h2>
-        <p>Vista de detalle WAV para comparar el audio original y el cuantizado.</p>
-
-        <div className="comparison-zoom-controls">
-          <button type="button" onClick={() => setComparisonZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}>
-            Zoom out
-          </button>
-          <button type="button" onClick={() => setComparisonZoom((value) => Math.min(4, Number((value + 0.25).toFixed(2))))}>
-            Zoom in
-          </button>
-          <button type="button" onClick={() => setComparisonZoom(1.5)}>
-            Reset
-          </button>
-        </div>
-
-        <div className="metronome-controls">
-          <button
-            type="button"
-            className={`metronome-switch ${metronomeEnabled ? 'metronome-switch-on' : ''}`}
-            onClick={() => {
-              void toggleMetronome();
-            }}
-            aria-pressed={metronomeEnabled}
-          >
-            <span className="metronome-switch-track">
-              <span className="metronome-switch-thumb" />
-            </span>
-            <span>{metronomeEnabled ? 'Metrónomo encendido' : 'Metrónomo apagado'}</span>
-          </button>
-
-          <label className="metronome-source-select" htmlFor="metronome-source-mode">
-            Fuente BPM
-            <select
-              id="metronome-source-mode"
-              value={metronomeSource}
-              onChange={(event) => setMetronomeSource(event.target.value as MetronomeSourceMode)}
-            >
-              <option value="effective">Efectivo / pedido</option>
-              <option value="detected">Detectado</option>
-            </select>
-          </label>
-
-          <div className="metronome-summary">
-            <span>BPM: {comparisonMetronomeLabel}</span>
-            <span>Beat: {metronomeBeatCount % 4 === 0 ? '1' : `${(metronomeBeatCount % 4) + 1}`}</span>
-          </div>
-        </div>
-
-        {metronomeStatus && <p className="section-state metronome-status">{metronomeStatus}</p>}
-
-        {quantizationSummary && (
-          <div className="quantization-detail-grid">
-            <div>
-              <span>detected_bpm</span>
-              <strong>{quantizationSummary.detectedBpm}</strong>
-            </div>
-            <div>
-              <span>effective_bpm</span>
-              <strong>{quantizationSummary.effectiveBpm}</strong>
-            </div>
-            <div>
-              <span>grid_subdivision</span>
-              <strong>{quantizationSummary.gridSubdivision}</strong>
-            </div>
-            <div>
-              <span>quantize_strength</span>
-              <strong>{quantizationSummary.quantizeStrength}</strong>
-            </div>
-            <div>
-              <span>analysis mode</span>
-              <strong className={quantizationSummary.bpmForced ? 'detail-badge detail-badge-forced' : 'detail-badge'}>
-                {quantizationSummary.bpmForced ? 'BPM forced' : 'quantized by rhythmic analysis'}
-              </strong>
-            </div>
-            <div>
-              <span>grid_sec</span>
-              <strong>{quantizationSummary.gridSec.length} marcadores</strong>
-            </div>
-            <div>
-              <span>quantized_events</span>
-              <strong>{quantizationSummary.quantizedEvents.length} eventos</strong>
-            </div>
-          </div>
-        )}
-
-        <div className="waveform-compare-grid">
-          <WaveformPreviewCard
-            title="Antes"
-            color="#ff3ecf"
-            source={beforeAudio}
-            gridSec={quantizationSummary?.gridSec}
-            quantizedEvents={quantizationSummary?.quantizedEvents}
-            zoomLevel={comparisonZoom}
-            cursorRatio={comparisonCursorRatio}
-            onCursorRatioChange={setComparisonCursorRatio}
-            onDurationMeasured={(durationSec) => setComparisonDurationSec((current) => Math.max(current, durationSec))}
-          />
-          <WaveformPreviewCard
-            title="Despues"
-            color="#b026ff"
-            source={afterAudio}
-            gridSec={quantizationSummary?.gridSec}
-            quantizedEvents={quantizationSummary?.quantizedEvents}
-            zoomLevel={comparisonZoom}
-            cursorRatio={comparisonCursorRatio}
-            onCursorRatioChange={setComparisonCursorRatio}
-            onDurationMeasured={(durationSec) => setComparisonDurationSec((current) => Math.max(current, durationSec))}
-          />
-        </div>
-      </section>
-
       <section className="quantize-panel">
         <h2>Batch - POST /quantize/batch</h2>
         <form onSubmit={submitBatch} className="quantize-form-grid">
@@ -1874,6 +1535,17 @@ function QuantizeDashboardPage() {
         <h2>Comparación Before / After</h2>
         <p>Los archivos se eliminan automáticamente después de 24 horas.</p>
         <p className="section-state comparison-cursor-readout">Cursor actual: {comparisonCursorLabel}</p>
+        <div className="comparison-zoom-controls">
+          <button type="button" onClick={() => setComparisonZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}>
+            Zoom out
+          </button>
+          <button type="button" onClick={() => setComparisonZoom((value) => Math.min(4, Number((value + 0.25).toFixed(2))))}>
+            Zoom in
+          </button>
+          <button type="button" onClick={() => setComparisonZoom(1.5)}>
+            Reset
+          </button>
+        </div>
 
         {gcsConfigured === false && <p className="section-state">GCS no está configurado todavía. Cuando se habilite, aquí aparecerán los pares de audio.</p>}
         {gcsConfigured !== false && cloudFilesLoading && <p className="section-state">Cargando archivos en la nube...</p>}
