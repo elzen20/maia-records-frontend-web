@@ -15,6 +15,7 @@ import './QuantizeDashboardPage.css';
 
 type SingleResponseMode = 'json' | 'file';
 type BatchResponseMode = 'json' | 'zip';
+const LAST_QUANTIZATION_RESULT_STORAGE_KEY = 'quantize:lastResult';
 
 interface SingleFormState {
   file: File | null;
@@ -47,6 +48,8 @@ type CloudFile = {
   updated: string | null;
   kind: 'original' | 'quantized' | 'other';
   signedUrl?: string;
+  metadata?: Record<string, unknown>;
+  quantizeMetadata?: Record<string, unknown>;
 };
 
 type ComparisonItem = {
@@ -188,6 +191,20 @@ function firstString(...values: unknown[]): string {
   return '';
 }
 
+function firstText(...values: unknown[]): string {
+  for (const value of values) {
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+
+  return '';
+}
+
 function toNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) {
     return value;
@@ -197,6 +214,34 @@ function toNumber(value: unknown): number | null {
     const parsed = Number(value);
     if (Number.isFinite(parsed)) {
       return parsed;
+    }
+  }
+
+  return null;
+}
+
+function toBoolean(value: unknown): boolean | null {
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  if (typeof value === 'number') {
+    if (value === 1) {
+      return true;
+    }
+    if (value === 0) {
+      return false;
+    }
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      return true;
+    }
+    if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      return false;
     }
   }
 
@@ -449,47 +494,126 @@ function groupCloudFiles(files: CloudFile[]): ComparisonItem[] {
 
 function readQuantizationDetailSummary(payload: Record<string, unknown>): QuantizationDetailSummary {
   const source = isRecord(payload.data) ? payload.data : payload;
-  const analysis = isRecord(source.analysis) ? source.analysis : source;
-  const analysisDetails = isRecord(analysis.analysis) ? analysis.analysis : analysis;
-  const timing = isRecord(analysis.timing) ? analysis.timing : {};
+  const analysis =
+    (isRecord(source.analysis) ? source.analysis : null)
+    || (isRecord(source.analysis_result) ? source.analysis_result : null)
+    || source;
+  const analysisDetails =
+    (isRecord(analysis.analysis) ? analysis.analysis : null)
+    || (isRecord(analysis.details) ? analysis.details : null)
+    || analysis;
+  const timing =
+    (isRecord(analysis.timing) ? analysis.timing : null)
+    || (isRecord(analysisDetails.timing) ? analysisDetails.timing : null)
+    || {};
   const quantizedEventsValue = isRecord(timing.quantized_events)
     ? timing.quantized_events.quantized_onset_seg ?? timing.quantized_events.quantizedOnsetSeg ?? timing.quantized_events
-    : timing.quantized_events ?? source.quantized_events ?? source.quantizedEvents;
+    : timing.quantized_events
+      ?? timing.quantized_onset_seg
+      ?? timing.quantizedOnsetSeg
+      ?? source.quantized_events
+      ?? source.quantizedEvents
+      ?? source.quantized_onset_seg;
 
   return {
     detectedBpm:
-      firstString(
+      firstText(
         analysisDetails.detected_bpm,
         analysisDetails.detectedBpm,
+        analysisDetails.bpm,
         source.detected_bpm,
         source.detectedBpm,
+        source.bpm,
       ) || 'N/D',
     effectiveBpm:
-      firstString(
+      firstText(
         analysisDetails.effective_bpm,
         analysisDetails.effectiveBpm,
         source.effective_bpm,
         source.effectiveBpm,
+        analysisDetails.bpm,
+        source.bpm,
       ) || 'N/D',
     gridSubdivision:
-      firstString(
+      firstText(
         analysisDetails.grid_subdivision,
         analysisDetails.gridSubdivision,
+        analysisDetails.subdivision,
+        analysisDetails.subdiv,
         source.grid_subdivision,
         source.gridSubdivision,
+        source.subdivision,
+        source.subdiv,
       ) || 'N/D',
     timeSignature:
-      firstString(
+      firstText(
         analysisDetails.time_signature,
         analysisDetails.timeSignature,
+        analysisDetails.signature,
+        analysisDetails.meter,
         source.time_signature,
         source.timeSignature,
+        source.signature,
+        source.meter,
       ) || 'N/D',
-    quantizeStrength: firstString(source.quantize_strength, source.quantizeStrength, source.strength) || 'N/D',
-    bpmForced: Boolean(source.forceBpm || source.force_bpm || analysisDetails.forceBpm || analysisDetails.force_bpm),
-    gridSec: extractNumberArray(timing.grid_sec ?? timing.gridSec ?? source.grid_sec ?? source.gridSec),
+    quantizeStrength: firstText(source.quantize_strength, source.quantizeStrength, source.strength) || 'N/D',
+    bpmForced:
+      toBoolean(source.forceBpm)
+      ?? toBoolean(source.force_bpm)
+      ?? toBoolean(source.bpmForced)
+      ?? toBoolean(source.bpm_forced)
+      ?? toBoolean(analysisDetails.forceBpm)
+      ?? toBoolean(analysisDetails.force_bpm)
+      ?? toBoolean(analysisDetails.bpmForced)
+      ?? toBoolean(analysisDetails.bpm_forced)
+      ?? false,
+    gridSec: extractNumberArray(
+      timing.grid_sec
+      ?? timing.gridSec
+      ?? timing.grid
+      ?? source.grid_sec
+      ?? source.gridSec
+      ?? source.grid,
+    ),
     quantizedEvents: extractNumberArray(quantizedEventsValue),
   };
+}
+
+function hasUsefulQuantizationSummary(summary: QuantizationDetailSummary): boolean {
+  return Boolean(
+    summary.detectedBpm !== 'N/D'
+    || summary.effectiveBpm !== 'N/D'
+    || summary.gridSubdivision !== 'N/D'
+    || summary.timeSignature !== 'N/D'
+    || summary.gridSec.length > 0
+    || summary.quantizedEvents.length > 0,
+  );
+}
+
+function readQuantizationSummaryFromCloudFile(file?: CloudFile): QuantizationDetailSummary | null {
+  if (!file) {
+    return null;
+  }
+
+  const candidates: unknown[] = [
+    file.quantizeMetadata,
+    file.metadata,
+    isRecord(file.metadata) ? file.metadata.quantization : null,
+    isRecord(file.metadata) ? file.metadata.analysis : null,
+  ];
+
+  for (const candidate of candidates) {
+    if (!isRecord(candidate)) {
+      continue;
+    }
+
+    const summary = readQuantizationDetailSummary(candidate);
+    if (hasUsefulQuantizationSummary(summary)) {
+      return summary;
+    }
+  }
+
+  return null;
 }
 
 function formatWaveMarkerLabel(value: number): string {
@@ -524,10 +648,19 @@ function normalizeCloudFiles(payload: unknown): CloudFile[] {
 
   return rawFiles
     .map((item, index) => {
+      const itemRecord = item as unknown as Record<string, unknown>;
       const name = firstString(item.name, item.objectName, item.filename, `file-${index + 1}`);
       const updated = firstString(item.updatedAt, item.updated) || null;
       const size = toNumber(item.sizeBytes ?? item.size) ?? 0;
       const kind = normalizeCloudFileKind(name, item.kind);
+      const metadata =
+        (isRecord(itemRecord.metadata) ? itemRecord.metadata : null)
+        || (isRecord(itemRecord.meta) ? itemRecord.meta : null)
+        || undefined;
+      const quantizeMetadata =
+        (isRecord(itemRecord.quantizeMetadata) ? itemRecord.quantizeMetadata : null)
+        || (isRecord(itemRecord.quantize_metadata) ? itemRecord.quantize_metadata : null)
+        || undefined;
 
       return {
         name,
@@ -535,6 +668,8 @@ function normalizeCloudFiles(payload: unknown): CloudFile[] {
         updated,
         kind,
         signedUrl: firstString(item.signedUrl) || undefined,
+        metadata,
+        quantizeMetadata,
       };
     })
     .filter((file) => file.kind === 'original' || file.kind === 'quantized' || file.kind === 'other');
@@ -759,10 +894,12 @@ function WaveformPreviewCard({
   const cursorLabelRef = useRef<HTMLSpanElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const metronomeTimerRef = useRef<number | null>(null);
+  const metronomeAlignTimeoutRef = useRef<number | null>(null);
   const metronomeAudioContextRef = useRef<AudioContext | null>(null);
   const metronomeBeatRef = useRef(0);
   const isDraggingWave = useRef(false);
   const isDraggingMinimap = useRef(false);
+  const isScrubbingPlaybackRef = useRef(false);
   const waveformBarCount = 240;
 
   // Waveform scrollable viewport and minimap window indicator
@@ -774,6 +911,8 @@ function WaveformPreviewCard({
   const waveContentWidth = `${Math.max(100, zoomLevel * 120)}%`;
   const beatMarkerPositions = buildBeatMarkerPercentages(durationSec, effectiveBpm || detectedBpm || '');
   const barMarkerPositions = buildBarMarkerPercentages(durationSec, effectiveBpm || detectedBpm || '', timeSignature || '');
+  const timelineBarLabelStride = Math.max(1, Math.ceil((barMarkerPositions.length || gridMarkerPositions.length || 1) / 10));
+  const beatGuideStride = Math.max(1, Math.ceil((beatMarkerPositions.length || 1) / 80));
   const musicalGridLabel = formatMusicalGridLabel(effectiveBpm || detectedBpm || '', timeSignature || '', gridSubdivision || '');
   const comparisonBadgeLabel = comparisonLabel.toLowerCase() === 'original' ? 'Antes' : 'Después';
   const waveformPath = useMemo(() => buildWaveformPath(peaks), [peaks]);
@@ -786,8 +925,12 @@ function WaveformPreviewCard({
   const canUseMetronome = Boolean(bpmForMetronome && bpmForMetronome > 0);
 
   const clearMetronome = useCallback(() => {
+    if (metronomeAlignTimeoutRef.current !== null) {
+      window.clearTimeout(metronomeAlignTimeoutRef.current);
+      metronomeAlignTimeoutRef.current = null;
+    }
     if (metronomeTimerRef.current !== null) {
-      window.clearInterval(metronomeTimerRef.current);
+      window.clearTimeout(metronomeTimerRef.current);
       metronomeTimerRef.current = null;
     }
   }, []);
@@ -822,35 +965,71 @@ function WaveformPreviewCard({
       return;
     }
 
-    const oscillator = context.createOscillator();
-    const gain = context.createGain();
-    oscillator.type = accent ? 'square' : 'sine';
-    oscillator.frequency.value = accent ? 1100 : 760;
-    gain.gain.value = accent ? 0.16 : 0.08;
-    oscillator.connect(gain);
-    gain.connect(context.destination);
-    oscillator.start();
-    oscillator.stop(context.currentTime + 0.04);
+    const renderClick = () => {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = accent ? 'square' : 'sine';
+      oscillator.frequency.value = accent ? 1100 : 760;
+      gain.gain.value = accent ? 0.22 : 0.12;
+      oscillator.connect(gain);
+      gain.connect(context.destination);
+      const startAt = context.currentTime + 0.002;
+      oscillator.start(startAt);
+      oscillator.stop(startAt + 0.05);
+    };
+
+    if (context.state === 'suspended') {
+      void context.resume().then(() => {
+        renderClick();
+      }).catch(() => {
+        // Ignore resume errors; browser may block audio until next gesture.
+      });
+      return;
+    }
+
+    renderClick();
   }, [bpmForMetronome]);
 
-  const startMetronome = useCallback(() => {
+  const startMetronome = useCallback((startTimeSec?: number) => {
     const bpm = bpmForMetronome;
     if (!metronomeEnabled || !bpm || bpm <= 0) {
       return;
     }
 
     stopMetronome();
-    metronomeBeatRef.current = 0;
-    playMetronomeClick(true);
-    metronomeBeatRef.current += 1;
 
-    const intervalMs = 60000 / bpm;
-    metronomeTimerRef.current = window.setInterval(() => {
-      const beatIndex = metronomeBeatRef.current;
-      playMetronomeClick(beatIndex % beatsPerBar === 0);
-      metronomeBeatRef.current += 1;
-    }, intervalMs);
-  }, [beatsPerBar, bpmForMetronome, metronomeEnabled, playMetronomeClick, stopMetronome]);
+    const beatDurationSec = 60 / bpm;
+    const scheduleNextTick = (referenceTimeSec?: number) => {
+      const audio = audioRef.current;
+      if (!audio || audio.paused || !metronomeEnabled) {
+        clearMetronome();
+        return;
+      }
+
+      const nowSec = Math.max(
+        0,
+        typeof referenceTimeSec === 'number' && Number.isFinite(referenceTimeSec)
+          ? referenceTimeSec
+          : audio.currentTime,
+      );
+      // Keep ticks phase-locked to audio and always schedule into the future.
+      const nextBeatIndex = Math.floor((nowSec + 0.002) / beatDurationSec) + 1;
+      const nextBeatTimeSec = nextBeatIndex * beatDurationSec;
+      const delayMs = Math.max(8, (nextBeatTimeSec - nowSec) * 1000);
+
+      metronomeBeatRef.current = nextBeatIndex;
+      metronomeTimerRef.current = window.setTimeout(() => {
+        const beatIndex = metronomeBeatRef.current;
+        playMetronomeClick(beatIndex % beatsPerBar === 0);
+        scheduleNextTick();
+      }, delayMs);
+    };
+
+    metronomeAlignTimeoutRef.current = window.setTimeout(() => {
+      metronomeAlignTimeoutRef.current = null;
+      scheduleNextTick(startTimeSec);
+    }, 0);
+  }, [beatsPerBar, bpmForMetronome, clearMetronome, metronomeEnabled, playMetronomeClick, stopMetronome]);
 
   const syncPlaybackPosition = useCallback((timeSec: number) => {
     const duration = durationSecRef.current;
@@ -936,6 +1115,15 @@ function WaveformPreviewCard({
   }, [isPlaying, syncPlaybackPosition]);
 
   useEffect(() => {
+    if (!isPlaying || !metronomeEnabled) {
+      stopMetronome();
+      return;
+    }
+
+    startMetronome(audioRef.current?.currentTime ?? 0);
+  }, [isPlaying, metronomeEnabled, startMetronome, stopMetronome]);
+
+  useEffect(() => {
     return () => {
       if (activePlaybackHandle?.id === playerId) {
         activePlaybackHandle = null;
@@ -954,6 +1142,43 @@ function WaveformPreviewCard({
       const d = durationSecRef.current;
       cursorLabelRef.current.textContent = d > 0 ? `${formatClockTime(d * ratio)} / ${formatClockTime(d)}` : `${Math.round(ratio * 100)}%`;
     }
+  };
+
+  const seekToTime = useCallback((timeSec: number) => {
+    const audio = audioRef.current;
+    const duration = durationSecRef.current;
+    if (!audio || !Number.isFinite(duration) || duration <= 0) {
+      return;
+    }
+
+    const boundedTime = Math.min(duration, Math.max(0, timeSec));
+    audio.currentTime = boundedTime;
+    syncPlaybackPosition(boundedTime);
+
+    if (metronomeEnabled && !audio.paused) {
+      startMetronome(boundedTime);
+    }
+  }, [metronomeEnabled, startMetronome, syncPlaybackPosition]);
+
+  const seekBySeconds = useCallback((deltaSec: number) => {
+    const audio = audioRef.current;
+    const baseTime = audio ? audio.currentTime : currentTime;
+    seekToTime(baseTime + deltaSec);
+  }, [currentTime, seekToTime]);
+
+  const seekToRatio = useCallback((ratio: number) => {
+    const duration = durationSecRef.current;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return;
+    }
+
+    const boundedRatio = Math.min(1, Math.max(0, ratio));
+    seekToTime(boundedRatio * duration);
+  }, [seekToTime]);
+
+  const getPlaybackTrackRatio = (event: React.PointerEvent<HTMLDivElement>) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
   };
 
   const syncWindow = () => {
@@ -982,7 +1207,7 @@ function WaveformPreviewCard({
     // Zoom such that ~60% of the viewport shows the clicked region
     const rect = event.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-    const targetZoom = Math.min(4, Math.max(0.5, 1.67)); // Zoom to ~1.67x to show ~60% around click point
+    const targetZoom = Math.min(6, Math.max(0.5, 1.67)); // Zoom to ~1.67x to show ~60% around click point
     onZoomChange?.(Number(targetZoom.toFixed(2)));
     // Pan to center around the clicked point
     panWaveformTo(Math.max(0, Math.min(1, ratio - 0.3)));
@@ -1104,7 +1329,16 @@ function WaveformPreviewCard({
             }}
           />
 
-          {loading && <p className="section-state">Analizando onda...</p>}
+          {loading && (
+            <p className="section-state wave-analyzing-state" aria-live="polite">
+              Analizando onda
+              <span className="wave-analyzing-dots" aria-hidden="true">
+                <span>.</span>
+                <span>.</span>
+                <span>.</span>
+              </span>
+            </p>
+          )}
           {!loading && waveError && <p className="status-error">No se pudo dibujar la onda: {waveError}</p>}
 
           {!loading && peaks.length > 0 && (
@@ -1146,6 +1380,13 @@ function WaveformPreviewCard({
                   }
                 }}
                 onTimeUpdate={(event) => syncPlaybackPosition(event.currentTarget.currentTime)}
+                onSeeked={(event) => {
+                  const timeSec = event.currentTarget.currentTime;
+                  syncPlaybackPosition(timeSec);
+                  if (!event.currentTarget.paused && metronomeEnabled) {
+                    startMetronome(timeSec);
+                  }
+                }}
                 onEnded={() => {
                   setIsPlaying(false);
                   stopMetronome();
@@ -1166,6 +1407,12 @@ function WaveformPreviewCard({
                 <button type="button" className="wave-playback-button" onClick={togglePlayback} disabled={!source?.url}>
                   {isPlaying ? 'Pausa' : 'Play'}
                 </button>
+                <button type="button" className="wave-playback-step-button" onClick={() => seekBySeconds(-5)} disabled={!source?.url}>
+                  -5s
+                </button>
+                <button type="button" className="wave-playback-step-button" onClick={() => seekBySeconds(5)} disabled={!source?.url}>
+                  +5s
+                </button>
                 <button
                   type="button"
                   className={`wave-metronome-button ${metronomeEnabled ? 'wave-metronome-button-active' : ''}`}
@@ -1178,8 +1425,33 @@ function WaveformPreviewCard({
                 <span className="wave-playback-time">{playbackClockLabel}</span>
               </div>
 
-              <div className="wave-playback-track" aria-hidden="true">
+              <div className="wave-playback-track">
                 <div className="wave-playback-track-fill" style={{ width: `${playbackPercent}%` }} />
+                <span className="wave-playback-thumb" style={{ left: `${playbackPercent}%` }} aria-hidden="true" />
+                <div
+                  className="wave-playback-scrub-zone"
+                  onPointerDown={(event) => {
+                    isScrubbingPlaybackRef.current = true;
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                    seekToRatio(getPlaybackTrackRatio(event));
+                  }}
+                  onPointerMove={(event) => {
+                    if (!isScrubbingPlaybackRef.current) {
+                      return;
+                    }
+                    seekToRatio(getPlaybackTrackRatio(event));
+                  }}
+                  onPointerUp={(event) => {
+                    isScrubbingPlaybackRef.current = false;
+                    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                      event.currentTarget.releasePointerCapture(event.pointerId);
+                    }
+                  }}
+                  onPointerCancel={() => {
+                    isScrubbingPlaybackRef.current = false;
+                  }}
+                  title="Arrastra para mover la reproducción"
+                />
               </div>
 
               {/* Scrollable + zoomable waveform viewport */}
@@ -1198,7 +1470,7 @@ function WaveformPreviewCard({
                     {beatMarkerPositions.map((marker, index) => (
                       <span
                         key={`${title}-beat-${index}`}
-                        className="wave-marker wave-marker-beat"
+                        className={`wave-marker wave-marker-beat ${index % beatsPerBar === 0 ? 'wave-marker-beat-accent' : ''}`}
                         style={{ left: `${marker}%` }}
                         title={`beat ${index + 1}`}
                       />
@@ -1258,19 +1530,45 @@ function WaveformPreviewCard({
               <span>zoom x{zoomLevel.toFixed(1)} · click = zoom · bordes = zoom · centro = pan · grid musical basada en BPM</span>
               <span ref={cursorLabelRef}>–</span>
             </div>
+            <div className="timeline-beat-guide" aria-hidden="true">
+              {beatMarkerPositions.map((marker, index) => {
+                if (index % beatGuideStride !== 0) {
+                  return null;
+                }
+
+                const isAccent = index % beatsPerBar === 0;
+                return (
+                  <span
+                    key={`${title}-timeline-beat-${index}`}
+                    className={`timeline-beat-guide-marker ${isAccent ? 'timeline-beat-guide-marker-accent' : ''}`}
+                    style={{ left: `${marker}%` }}
+                    data-label={isAccent ? `${Math.floor(index / beatsPerBar) + 1}` : undefined}
+                  />
+                );
+              })}
+            </div>
             <div className="timeline-bar-labels" aria-hidden="true">
               {barMarkerPositions.length > 0 ? (
-                barMarkerPositions.map((marker, index) => (
-                  <span
-                    key={`${title}-bar-label-${index}`}
-                    className="timeline-bar-label timeline-bar-label-major"
-                    style={{ left: `${marker}%` }}
-                  >
-                    {`Bar ${index + 1}`}
-                  </span>
-                ))
+                barMarkerPositions.map((marker, index) => {
+                  if (index % timelineBarLabelStride !== 0) {
+                    return null;
+                  }
+
+                  return (
+                    <span
+                      key={`${title}-bar-label-${index}`}
+                      className="timeline-bar-label timeline-bar-label-major"
+                      style={{ left: `${marker}%` }}
+                    >
+                      {`Bar ${index + 1}`}
+                    </span>
+                  );
+                })
               ) : gridSec && gridSec.length > 0 ? (
                 gridSec.map((marker, index) => {
+                  if (index % timelineBarLabelStride !== 0) {
+                    return null;
+                  }
                   const isBar = index % 4 === 0;
                   return (
                     <span
@@ -1319,7 +1617,7 @@ function WaveformPreviewCard({
                   const totalDeltaX = e.clientX - minimapDragStartXRef.current;
                   const sensitivity = 300; // 300px of drag = 1x zoom multiplier
                   const zoomMultiplier = 1 + totalDeltaX / sensitivity;
-                  const newZoom = Math.min(4, Math.max(0.5, Number((minimapDragInitialZoomRef.current * zoomMultiplier).toFixed(2))));
+                  const newZoom = Math.min(6, Math.max(0.5, Number((minimapDragInitialZoomRef.current * zoomMultiplier).toFixed(2))));
                   onZoomChange?.(newZoom);
                 }
               }}
@@ -1409,7 +1707,19 @@ function QuantizeDashboardPage() {
 
   const [singleResult, setSingleResult] = useState<Record<string, unknown> | null>(null);
   const [batchResult, setBatchResult] = useState<Record<string, unknown> | null>(null);
-  const [latestQuantizationResult, setLatestQuantizationResult] = useState<Record<string, unknown> | null>(null);
+  const [latestQuantizationResult, setLatestQuantizationResult] = useState<Record<string, unknown> | null>(() => {
+    try {
+      const stored = window.localStorage.getItem(LAST_QUANTIZATION_RESULT_STORAGE_KEY);
+      if (!stored) {
+        return null;
+      }
+
+      const parsed = JSON.parse(stored);
+      return isRecord(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  });
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [comparisonZoom, setComparisonZoom] = useState(1.5);
@@ -1595,7 +1905,12 @@ function QuantizeDashboardPage() {
     }
   };
 
-  const renderCloudFileCell = (label: string, file: CloudFile | undefined, accentClassName: string) => {
+  const renderCloudFileCell = (
+    label: string,
+    file: CloudFile | undefined,
+    accentClassName: string,
+    summary: QuantizationDetailSummary | null,
+  ) => {
     if (!file) {
       return <p className="cloud-file-empty">No disponible</p>;
     }
@@ -1615,12 +1930,12 @@ function QuantizeDashboardPage() {
             comparisonLabel={label}
             playerId={`${label}-${file.name}`}
             source={audioSource ? { label: file.name, url: audioSource, sizeBytes: file.size } : null}
-            gridSec={quantizationSummary?.gridSec}
-            quantizedEvents={quantizationSummary?.quantizedEvents}
-            detectedBpm={quantizationSummary?.detectedBpm}
-            effectiveBpm={quantizationSummary?.effectiveBpm}
-            timeSignature={quantizationSummary?.timeSignature}
-            gridSubdivision={quantizationSummary?.gridSubdivision}
+            gridSec={summary?.gridSec}
+            quantizedEvents={summary?.quantizedEvents}
+            detectedBpm={summary?.detectedBpm}
+            effectiveBpm={summary?.effectiveBpm}
+            timeSignature={summary?.timeSignature}
+            gridSubdivision={summary?.gridSubdivision}
             zoomLevel={comparisonZoom}
             onZoomChange={setComparisonZoom}
           />
@@ -1676,6 +1991,11 @@ function QuantizeDashboardPage() {
         console.log('Respuesta JSON recibida:', json);
         setSingleResult(json);
         setLatestQuantizationResult(json);
+        try {
+          window.localStorage.setItem(LAST_QUANTIZATION_RESULT_STORAGE_KEY, JSON.stringify(json));
+        } catch {
+          // Ignore storage failures.
+        }
         setMessage('Cuantizacion individual completada.');
         await refreshTemporaryFiles();
       } else {
@@ -1752,6 +2072,11 @@ function QuantizeDashboardPage() {
       console.log('Respuesta JSON recibida:', json);
       setBatchResult(json);
       setLatestQuantizationResult(json);
+      try {
+        window.localStorage.setItem(LAST_QUANTIZATION_RESULT_STORAGE_KEY, JSON.stringify(json));
+      } catch {
+        // Ignore storage failures.
+      }
       setMessage('Proceso batch completado.');
       await refreshTemporaryFiles();
     } catch (requestError) {
@@ -2016,7 +2341,7 @@ function QuantizeDashboardPage() {
           <button type="button" onClick={() => setComparisonZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}>
             Zoom out
           </button>
-          <button type="button" onClick={() => setComparisonZoom((value) => Math.min(4, Number((value + 0.25).toFixed(2))))}>
+          <button type="button" onClick={() => setComparisonZoom((value) => Math.min(6, Number((value + 0.25).toFixed(2))))}>
             Zoom in
           </button>
           <button type="button" onClick={() => setComparisonZoom(1.5)}>
@@ -2035,36 +2360,45 @@ function QuantizeDashboardPage() {
         {gcsConfigured !== false && !cloudFilesLoading && !cloudFilesError && comparisonItems.length > 0 && (
           <div className="cloud-files-list">
             {comparisonItems.map((item) => (
-              <details
-                key={item.trackKey}
-                className="cloud-file-group"
-                onToggle={(event) => {
-                  if (event.currentTarget.open) {
-                    void hydrateComparisonItem(item);
-                  }
-                }}
-              >
-                <summary className="cloud-file-group-summary">
-                  <div>
-                    <p className="cloud-file-group-label">trackName</p>
-                    <h3>{item.trackKey}</h3>
-                  </div>
-                  <span className={`cloud-file-group-badge cloud-file-group-badge-${item.status}`}>
-                    {item.status === 'complete' ? 'Complete' : 'Pending pair'}
-                  </span>
-                </summary>
+              (() => {
+                const itemSummary =
+                  readQuantizationSummaryFromCloudFile(item.quantized)
+                  || readQuantizationSummaryFromCloudFile(item.original)
+                  || quantizationSummary;
 
-                <div className="cloud-file-columns">
-                  <div className="cloud-file-column">
-                    {renderCloudFileCell('Original', item.original, 'cloud-file-original')}
-                  </div>
-                  <div className="cloud-file-column">
-                    {renderCloudFileCell('Quantized', item.quantized, 'cloud-file-quantized')}
-                  </div>
-                </div>
+                return (
+                  <details
+                    key={item.trackKey}
+                    className="cloud-file-group"
+                    onToggle={(event) => {
+                      if (event.currentTarget.open) {
+                        void hydrateComparisonItem(item);
+                      }
+                    }}
+                  >
+                    <summary className="cloud-file-group-summary">
+                      <div>
+                        <p className="cloud-file-group-label">trackName</p>
+                        <h3>{item.trackKey}</h3>
+                      </div>
+                      <span className={`cloud-file-group-badge cloud-file-group-badge-${item.status}`}>
+                        {item.status === 'complete' ? 'Complete' : 'Pending pair'}
+                      </span>
+                    </summary>
 
-                {hydratingTrackKeys[item.trackKey] && <p className="section-state">Preparando signed URLs...</p>}
-              </details>
+                    <div className="cloud-file-columns">
+                      <div className="cloud-file-column">
+                        {renderCloudFileCell('Original', item.original, 'cloud-file-original', itemSummary)}
+                      </div>
+                      <div className="cloud-file-column">
+                        {renderCloudFileCell('Quantized', item.quantized, 'cloud-file-quantized', itemSummary)}
+                      </div>
+                    </div>
+
+                    {hydratingTrackKeys[item.trackKey] && <p className="section-state">Preparando signed URLs...</p>}
+                  </details>
+                );
+              })()
             ))}
           </div>
         )}
