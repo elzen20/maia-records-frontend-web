@@ -844,6 +844,7 @@ type ActivePlaybackHandle = {
   groupId: string;
   pause: () => void;
   getCurrentTime: () => number;
+  getViewportProgress: () => number | null;
   isPlaying: () => boolean;
 };
 
@@ -1123,6 +1124,19 @@ function WaveformPreviewCard({
           audio.pause();
         },
         getCurrentTime: () => audio.currentTime,
+        getViewportProgress: () => {
+          const viewport = waveViewportRef.current;
+          if (!viewport) {
+            return null;
+          }
+
+          const scrollable = viewport.scrollWidth - viewport.clientWidth;
+          if (scrollable <= 0) {
+            return 0;
+          }
+
+          return Math.min(1, Math.max(0, viewport.scrollLeft / scrollable));
+        },
         isPlaying: () => !audio.paused,
       };
       setIsPlaying(true);
@@ -1158,6 +1172,9 @@ function WaveformPreviewCard({
         : externalIsSameGroup
           ? (externalPlaybackHandle?.getCurrentTime() ?? NaN)
           : NaN;
+      const externalViewportProgress = externalIsSameGroup
+        ? (externalPlaybackHandle?.getViewportProgress() ?? null)
+        : null;
 
       if (Number.isFinite(currentPlaybackTime)) {
         syncPlaybackPosition(currentPlaybackTime);
@@ -1169,13 +1186,18 @@ function WaveformPreviewCard({
             const content = vp.scrollWidth;
             const visible = vp.clientWidth;
             if (content > visible) {
-              const cursorX = (Math.min(duration, Math.max(0, currentPlaybackTime)) / duration) * content;
-              const margin = visible * (followSensitivityPct / 100);
-              const minVisibleX = vp.scrollLeft + margin;
-              const maxVisibleX = vp.scrollLeft + visible - margin;
+              if (externalIsSameGroup && typeof externalViewportProgress === 'number' && Number.isFinite(externalViewportProgress)) {
+                const targetScrollLeft = Math.min(content - visible, Math.max(0, externalViewportProgress * (content - visible)));
+                vp.scrollLeft = targetScrollLeft;
+              } else {
+                const cursorX = (Math.min(duration, Math.max(0, currentPlaybackTime)) / duration) * content;
+                const margin = visible * (followSensitivityPct / 100);
+                const minVisibleX = vp.scrollLeft + margin;
+                const maxVisibleX = vp.scrollLeft + visible - margin;
 
-              if (cursorX < minVisibleX || cursorX > maxVisibleX) {
-                vp.scrollLeft = Math.min(content - visible, Math.max(0, cursorX - visible * 0.5));
+                if (cursorX < minVisibleX || cursorX > maxVisibleX) {
+                  vp.scrollLeft = Math.min(content - visible, Math.max(0, cursorX - visible * 0.5));
+                }
               }
             }
           }
@@ -1305,6 +1327,34 @@ function WaveformPreviewCard({
     if (scrollable > 0) vp.scrollLeft = ratio * scrollable;
     syncWindow();
   };
+
+  const focusTimelinePosition = useCallback((positionPct: number, preferredZoom?: number) => {
+    const clampedPct = Math.min(100, Math.max(0, positionPct));
+    const ratio = clampedPct / 100;
+    const targetZoom = typeof preferredZoom === 'number'
+      ? Math.min(6, Math.max(0.5, Number(preferredZoom.toFixed(2))))
+      : zoomLevel;
+
+    if (targetZoom !== zoomLevel) {
+      onZoomChange?.(targetZoom);
+      requestAnimationFrame(() => {
+        panWaveformTo(Math.max(0, Math.min(1, ratio - 0.3)));
+      });
+    } else {
+      panWaveformTo(Math.max(0, Math.min(1, ratio - 0.3)));
+    }
+
+    applyCursor(ratio);
+  }, [onZoomChange, panWaveformTo, zoomLevel]);
+
+  const handleBarLabelFocus = useCallback((positionPct: number, markerCount: number) => {
+    // Aim to show around 8 bars when jumping from bar labels.
+    const desiredVisibleBars = 8;
+    const computedZoom = markerCount > 0
+      ? markerCount / (1.2 * desiredVisibleBars)
+      : zoomLevel;
+    focusTimelinePosition(positionPct, computedZoom);
+  }, [focusTimelinePosition, zoomLevel]);
 
   const getMinimapZoneInfo = (event: React.PointerEvent<HTMLDivElement> | React.MouseEvent<HTMLDivElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -1445,6 +1495,19 @@ function WaveformPreviewCard({
                       }
                     },
                     getCurrentTime: () => audioRef.current?.currentTime ?? 0,
+                    getViewportProgress: () => {
+                      const viewport = waveViewportRef.current;
+                      if (!viewport) {
+                        return null;
+                      }
+
+                      const scrollable = viewport.scrollWidth - viewport.clientWidth;
+                      if (scrollable <= 0) {
+                        return 0;
+                      }
+
+                      return Math.min(1, Math.max(0, viewport.scrollLeft / scrollable));
+                    },
                     isPlaying: () => Boolean(audioRef.current && !audioRef.current.paused),
                   };
                   startMetronome();
@@ -1647,6 +1710,7 @@ function WaveformPreviewCard({
               <span>zoom x{zoomLevel.toFixed(1)} · click = zoom · bordes = zoom · centro = pan · grid musical basada en BPM</span>
               <span ref={cursorLabelRef}>–</span>
             </div>
+            <p className="timeline-minimap-help">Ajusta la onda: clic en Bar para enfocar, bordes para zoom, centro para mover.</p>
             <div className="timeline-beat-guide" aria-hidden="true">
               {beatMarkerPositions.map((marker, index) => {
                 if (index % beatGuideStride !== 0) {
@@ -1664,7 +1728,7 @@ function WaveformPreviewCard({
                 );
               })}
             </div>
-            <div className="timeline-bar-labels" aria-hidden="true">
+            <div className="timeline-bar-labels">
               {barMarkerPositions.length > 0 ? (
                 barMarkerPositions.map((marker, index) => {
                   if (index % timelineBarLabelStride !== 0) {
@@ -1672,13 +1736,16 @@ function WaveformPreviewCard({
                   }
 
                   return (
-                    <span
+                    <button
+                      type="button"
                       key={`${title}-bar-label-${index}`}
                       className="timeline-bar-label timeline-bar-label-major"
                       style={{ left: `${marker}%` }}
+                      onClick={() => handleBarLabelFocus(marker, barMarkerPositions.length)}
+                      title={`Enfocar Bar ${index + 1}`}
                     >
                       {`Bar ${index + 1}`}
-                    </span>
+                    </button>
                   );
                 })
               ) : gridSec && gridSec.length > 0 ? (
@@ -1688,13 +1755,16 @@ function WaveformPreviewCard({
                   }
                   const isBar = index % 4 === 0;
                   return (
-                    <span
+                    <button
+                      type="button"
                       key={`${title}-bar-label-${index}`}
                       className={`timeline-bar-label ${isBar ? 'timeline-bar-label-major' : 'timeline-bar-label-minor'}`}
                       style={{ left: `${gridMarkerPositions[index] || 0}%` }}
+                      onClick={() => handleBarLabelFocus(gridMarkerPositions[index] || 0, gridSec.length)}
+                      title={isBar ? `Enfocar Bar ${Math.floor(index / 4) + 1}` : `Enfocar pulso ${(index % 4) + 1}`}
                     >
                       {isBar ? `Bar ${Math.floor(index / 4) + 1}` : `${(index % 4) + 1}`}
-                    </span>
+                    </button>
                   );
                 })
               ) : (

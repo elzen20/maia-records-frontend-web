@@ -779,6 +779,12 @@
   font-size: 0.8rem;
 }
 
+.timeline-minimap-help {
+  margin: 0 0 8px;
+  color: #cbd5e1;
+  font-size: 0.78rem;
+}
+
 .timeline-bar-labels {
   position: relative;
   min-height: 24px;
@@ -794,7 +800,22 @@
   color: #dbeafe;
   white-space: nowrap;
   letter-spacing: 0.02em;
-  pointer-events: none;
+  pointer-events: auto;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+  line-height: 1.1;
+}
+
+.timeline-bar-label:hover {
+  text-shadow: 0 0 8px rgba(192, 132, 252, 0.6);
+}
+
+.timeline-bar-label:focus-visible {
+  outline: 1px solid rgba(192, 132, 252, 0.75);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .timeline-bar-label-major {
