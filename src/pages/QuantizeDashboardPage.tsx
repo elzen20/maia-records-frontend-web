@@ -1910,6 +1910,11 @@ function QuantizeDashboardPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [comparisonZoom, setComparisonZoom] = useState(1.5);
+  const [pendingScrollToTrack, setPendingScrollToTrack] = useState<string | null>(null);
+  const [focusedTrackKey, setFocusedTrackKey] = useState<string | null>(null);
+  const comparisonSectionRef = useRef<HTMLElement>(null);
+  const detailsRefsMap = useRef<Map<string, HTMLDetailsElement>>(new Map());
+  const hydrateItemCallbackRef = useRef<((item: ComparisonItem) => void) | null>(null);
   const [followPlaybackEnabled, setFollowPlaybackEnabled] = useState(() => {
     try {
       const stored = window.localStorage.getItem(PLAYHEAD_FOLLOW_STORAGE_KEY);
@@ -2050,6 +2055,42 @@ function QuantizeDashboardPage() {
     );
   };
 
+    hydrateItemCallbackRef.current = (item: ComparisonItem) => { void hydrateComparisonItem(item); };
+
+    useEffect(() => {
+      if (!pendingScrollToTrack || comparisonItems.length === 0 || cloudFilesLoading) {
+        return;
+      }
+
+      const matchingItem = comparisonItems.find((item) => item.trackKey.endsWith(pendingScrollToTrack));
+      if (!matchingItem) return;
+
+      const detailsEl = detailsRefsMap.current.get(matchingItem.trackKey);
+      if (!detailsEl) return;
+
+      setPendingScrollToTrack(null);
+      setFocusedTrackKey(matchingItem.trackKey);
+
+      if (!detailsEl.open) {
+        detailsEl.open = true;
+        hydrateItemCallbackRef.current?.(matchingItem);
+      }
+
+      requestAnimationFrame(() => {
+        detailsEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        detailsEl.focus({ preventScroll: true });
+      });
+
+      const clearFocusTimer = window.setTimeout(() => {
+        setFocusedTrackKey((previous) => (previous === matchingItem.trackKey ? null : previous));
+      }, 2600);
+
+      return () => {
+        window.clearTimeout(clearFocusTimer);
+      };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [comparisonItems, pendingScrollToTrack, cloudFilesLoading]);
+
   const hydrateComparisonItem = async (item: ComparisonItem) => {
     if (hydratingTrackKeys[item.trackKey]) {
       return;
@@ -2077,10 +2118,14 @@ function QuantizeDashboardPage() {
   };
 
   const refreshTemporaryFiles = async () => {
+    setCloudFilesLoading(true);
+    setCloudFilesError('');
     try {
       const response = await listQuantizeFiles(50);
 
       if (!response.ok) {
+        const errorMessage = await readErrorFromResponse(response);
+        setCloudFilesError(errorMessage);
         console.error('Error refrescando archivos temporales:', response);
         return;
       }
@@ -2088,9 +2133,24 @@ function QuantizeDashboardPage() {
       const payload = await response.json();
       setCloudFiles(normalizeCloudFiles(payload));
       setGcsConfigured(isRecord(payload) && typeof payload.gcsConfigured === 'boolean' ? payload.gcsConfigured : true);
-    } catch (error) {
-      console.error('Error al refrescar archivos temporales:', error);
+    } catch (requestError) {
+      setCloudFilesError(formatRequestError(requestError));
+      console.error('Error al refrescar archivos temporales:', requestError);
+      } finally {
+        setCloudFilesLoading(false);
+      }
+  };
+
+  const runPostSingleQuantizeFlow = async (submittedFileName: string | null) => {
+    if (submittedFileName) {
+      setPendingScrollToTrack(submittedFileName);
     }
+
+    requestAnimationFrame(() => {
+      comparisonSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+
+    await refreshTemporaryFiles();
   };
 
   const resolveTemporaryFileUrl = async (file: CloudFile): Promise<string> => {
@@ -2202,6 +2262,8 @@ function QuantizeDashboardPage() {
       return;
     }
 
+    const submittedFileName = singleForm.file.name;
+
     setSingleLoading(true);
 
     try {
@@ -2218,11 +2280,9 @@ function QuantizeDashboardPage() {
 
       const contentType = response.headers.get('content-type') || '';
       if (contentType.includes('audio/wav')) {
-        const blob = await response.blob();
-        const filename = getFilenameFromHeaders(response, `${singleForm.file.name}-quantized.wav`);
-        triggerDownload(blob, filename);
-        setMessage('Render WAV descargado correctamente.');
-        await refreshTemporaryFiles();
+        await response.blob();
+        setMessage('Cuantizacion individual completada. Actualizando comparación Before / After...');
+        await runPostSingleQuantizeFlow(submittedFileName);
         return;
       } else if (isJsonResponse(response)) {
         const json = (await response.json()) as Record<string, unknown>;
@@ -2234,8 +2294,8 @@ function QuantizeDashboardPage() {
         } catch {
           // Ignore storage failures.
         }
-        setMessage('Cuantizacion individual completada.');
-        await refreshTemporaryFiles();
+        setMessage('Cuantizacion individual completada. Actualizando comparación Before / After...');
+        await runPostSingleQuantizeFlow(submittedFileName);
       } else {
         throw new Error('Tipo de respuesta desconocido o no soportado.');
       }
@@ -2572,7 +2632,7 @@ function QuantizeDashboardPage() {
         </button>
       </section>
 
-      <section className="quantize-panel temp-files-panel">
+      <section ref={comparisonSectionRef} className="quantize-panel temp-files-panel">
         <h2>Comparación Before / After</h2>
         <p>Los archivos se eliminan automáticamente después de 24 horas.</p>
         <div className="comparison-zoom-controls">
@@ -2607,7 +2667,12 @@ function QuantizeDashboardPage() {
                 return (
                   <details
                     key={item.trackKey}
-                    className="cloud-file-group"
+                    tabIndex={-1}
+                    ref={(el) => {
+                      if (el) detailsRefsMap.current.set(item.trackKey, el);
+                      else detailsRefsMap.current.delete(item.trackKey);
+                    }}
+                    className={`cloud-file-group ${focusedTrackKey === item.trackKey ? 'cloud-file-group-focused' : ''}`}
                     onToggle={(event) => {
                       if (event.currentTarget.open) {
                         void hydrateComparisonItem(item);
