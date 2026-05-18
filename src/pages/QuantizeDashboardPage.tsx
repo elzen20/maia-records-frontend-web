@@ -16,6 +16,9 @@ import './QuantizeDashboardPage.css';
 type SingleResponseMode = 'json' | 'file';
 type BatchResponseMode = 'json' | 'zip';
 const LAST_QUANTIZATION_RESULT_STORAGE_KEY = 'quantize:lastResult';
+const METRONOME_OFFSET_STORAGE_KEY = 'quantize:metronomeOffsetMs';
+const PLAYHEAD_FOLLOW_STORAGE_KEY = 'quantize:playheadFollowEnabled';
+const PLAYHEAD_FOLLOW_SENSITIVITY_STORAGE_KEY = 'quantize:playheadFollowSensitivity';
 
 interface SingleFormState {
   file: File | null;
@@ -72,6 +75,11 @@ interface WaveformPreviewCardProps {
   source: AudioCompareSource | null;
   comparisonLabel: string;
   playerId: string;
+  syncGroupId: string;
+  followPlaybackEnabled: boolean;
+  onFollowPlaybackEnabledChange: (enabled: boolean) => void;
+  followSensitivityPct: number;
+  onFollowSensitivityPctChange: (sensitivityPct: number) => void;
   gridSec?: number[];
   quantizedEvents?: number[];
   detectedBpm?: string;
@@ -833,7 +841,10 @@ function buildWaveformPath(peaks: number[]): string {
 
 type ActivePlaybackHandle = {
   id: string;
+  groupId: string;
   pause: () => void;
+  getCurrentTime: () => number;
+  isPlaying: () => boolean;
 };
 
 let activePlaybackHandle: ActivePlaybackHandle | null = null;
@@ -866,6 +877,11 @@ function WaveformPreviewCard({
   source,
   comparisonLabel,
   playerId,
+  syncGroupId,
+  followPlaybackEnabled,
+  onFollowPlaybackEnabledChange,
+  followSensitivityPct,
+  onFollowSensitivityPctChange,
   gridSec,
   quantizedEvents,
   detectedBpm,
@@ -886,6 +902,23 @@ function WaveformPreviewCard({
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [metronomeEnabled, setMetronomeEnabled] = useState(false);
+  const [metronomeOffsetMs, setMetronomeOffsetMs] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(METRONOME_OFFSET_STORAGE_KEY);
+      if (!stored) {
+        return 0;
+      }
+
+      const parsed = Number(stored);
+      if (!Number.isFinite(parsed)) {
+        return 0;
+      }
+
+      return Math.min(30, Math.max(-30, Math.round(parsed)));
+    } catch {
+      return 0;
+    }
+  });
 
   // Cursor handled via DOM refs — zero React re-renders during drag
   const durationSecRef = useRef(0);
@@ -923,6 +956,14 @@ function WaveformPreviewCard({
   const timeSignatureInfo = parseTimeSignature(timeSignature || '');
   const beatsPerBar = timeSignatureInfo?.beatsPerBar || 4;
   const canUseMetronome = Boolean(bpmForMetronome && bpmForMetronome > 0);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(METRONOME_OFFSET_STORAGE_KEY, String(metronomeOffsetMs));
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [metronomeOffsetMs]);
 
   const clearMetronome = useCallback(() => {
     if (metronomeAlignTimeoutRef.current !== null) {
@@ -999,6 +1040,7 @@ function WaveformPreviewCard({
     stopMetronome();
 
     const beatDurationSec = 60 / bpm;
+    const offsetSec = metronomeOffsetMs / 1000;
     const scheduleNextTick = (referenceTimeSec?: number) => {
       const audio = audioRef.current;
       if (!audio || audio.paused || !metronomeEnabled) {
@@ -1013,8 +1055,8 @@ function WaveformPreviewCard({
           : audio.currentTime,
       );
       // Keep ticks phase-locked to audio and always schedule into the future.
-      const nextBeatIndex = Math.floor((nowSec + 0.002) / beatDurationSec) + 1;
-      const nextBeatTimeSec = nextBeatIndex * beatDurationSec;
+      const nextBeatIndex = Math.floor((nowSec - offsetSec + 0.002) / beatDurationSec) + 1;
+      const nextBeatTimeSec = nextBeatIndex * beatDurationSec + offsetSec;
       const delayMs = Math.max(8, (nextBeatTimeSec - nowSec) * 1000);
 
       metronomeBeatRef.current = nextBeatIndex;
@@ -1029,7 +1071,7 @@ function WaveformPreviewCard({
       metronomeAlignTimeoutRef.current = null;
       scheduleNextTick(startTimeSec);
     }, 0);
-  }, [beatsPerBar, bpmForMetronome, clearMetronome, metronomeEnabled, playMetronomeClick, stopMetronome]);
+  }, [beatsPerBar, bpmForMetronome, clearMetronome, metronomeEnabled, metronomeOffsetMs, playMetronomeClick, stopMetronome]);
 
   const syncPlaybackPosition = useCallback((timeSec: number) => {
     const duration = durationSecRef.current;
@@ -1076,15 +1118,18 @@ function WaveformPreviewCard({
       await audio.play();
       activePlaybackHandle = {
         id: playerId,
+        groupId: syncGroupId,
         pause: () => {
           audio.pause();
         },
+        getCurrentTime: () => audio.currentTime,
+        isPlaying: () => !audio.paused,
       };
       setIsPlaying(true);
     } catch (error) {
       setWaveError(formatRequestError(error));
     }
-  }, [isPlaying, playerId, source?.url, startMetronome]);
+  }, [isPlaying, playerId, source?.url, startMetronome, syncGroupId]);
 
   useEffect(() => {
     syncPlaybackPosition(0);
@@ -1096,23 +1141,52 @@ function WaveformPreviewCard({
   }, [playerId, source?.url, stopMetronome, syncPlaybackPosition]);
 
   useEffect(() => {
-    if (!isPlaying) {
-      return;
-    }
-
     let frameId = 0;
 
     const handleFrame = () => {
+      const externalPlaybackHandle = activePlaybackHandle;
+      const externalIsSameGroup = Boolean(
+        externalPlaybackHandle
+        && externalPlaybackHandle.id !== playerId
+        && externalPlaybackHandle.groupId === syncGroupId
+        && externalPlaybackHandle.isPlaying(),
+      );
       const audio = audioRef.current;
-      if (audio) {
-        syncPlaybackPosition(audio.currentTime);
+      const isLocalPlaying = Boolean(audio && !audio.paused);
+      const currentPlaybackTime = isLocalPlaying
+        ? (audio?.currentTime ?? 0)
+        : externalIsSameGroup
+          ? (externalPlaybackHandle?.getCurrentTime() ?? NaN)
+          : NaN;
+
+      if (Number.isFinite(currentPlaybackTime)) {
+        syncPlaybackPosition(currentPlaybackTime);
+
+        if (followPlaybackEnabled && !isDraggingMinimap.current && !isScrubbingPlaybackRef.current) {
+          const vp = waveViewportRef.current;
+          const duration = durationSecRef.current;
+          if (vp && Number.isFinite(duration) && duration > 0) {
+            const content = vp.scrollWidth;
+            const visible = vp.clientWidth;
+            if (content > visible) {
+              const cursorX = (Math.min(duration, Math.max(0, currentPlaybackTime)) / duration) * content;
+              const margin = visible * (followSensitivityPct / 100);
+              const minVisibleX = vp.scrollLeft + margin;
+              const maxVisibleX = vp.scrollLeft + visible - margin;
+
+              if (cursorX < minVisibleX || cursorX > maxVisibleX) {
+                vp.scrollLeft = Math.min(content - visible, Math.max(0, cursorX - visible * 0.5));
+              }
+            }
+          }
+        }
       }
       frameId = requestAnimationFrame(handleFrame);
     };
 
     frameId = requestAnimationFrame(handleFrame);
     return () => cancelAnimationFrame(frameId);
-  }, [isPlaying, syncPlaybackPosition]);
+  }, [followPlaybackEnabled, followSensitivityPct, isPlaying, playerId, syncGroupId, syncPlaybackPosition]);
 
   useEffect(() => {
     if (!isPlaying || !metronomeEnabled) {
@@ -1363,12 +1437,15 @@ function WaveformPreviewCard({
                   }
                   activePlaybackHandle = {
                     id: playerId,
+                    groupId: syncGroupId,
                     pause: () => {
                       const audio = audioRef.current;
                       if (audio) {
                         audio.pause();
                       }
                     },
+                    getCurrentTime: () => audioRef.current?.currentTime ?? 0,
+                    isPlaying: () => Boolean(audioRef.current && !audioRef.current.paused),
                   };
                   startMetronome();
                 }}
@@ -1422,6 +1499,46 @@ function WaveformPreviewCard({
                 >
                   {metronomeEnabled ? 'Metronomo ON' : 'Metronomo OFF'}
                 </button>
+                <button
+                  type="button"
+                  className={`wave-follow-button ${followPlaybackEnabled ? 'wave-follow-button-active' : ''}`}
+                  onClick={() => onFollowPlaybackEnabledChange(!followPlaybackEnabled)}
+                  title="Seguimiento automatico del cursor durante reproduccion"
+                >
+                  {followPlaybackEnabled ? 'Seguimiento ON' : 'Seguimiento OFF'}
+                </button>
+                <label className="wave-follow-sensitivity-control" title="Sensibilidad del seguimiento automatico">
+                  <span>Seg {followSensitivityPct}%</span>
+                  <input
+                    type="range"
+                    min={20}
+                    max={45}
+                    step={1}
+                    value={followSensitivityPct}
+                    onChange={(event) => onFollowSensitivityPctChange(Number(event.target.value))}
+                    disabled={!followPlaybackEnabled}
+                  />
+                </label>
+                <label className="wave-metronome-offset-control" title="Calibracion fina de latencia del metronomo">
+                  <span>Offset {metronomeOffsetMs} ms</span>
+                  <input
+                    type="range"
+                    min={-30}
+                    max={30}
+                    step={1}
+                    value={metronomeOffsetMs}
+                    onChange={(event) => setMetronomeOffsetMs(Number(event.target.value))}
+                    disabled={!canUseMetronome}
+                  />
+                  <button
+                    type="button"
+                    className="wave-metronome-offset-reset"
+                    onClick={() => setMetronomeOffsetMs(0)}
+                    disabled={!canUseMetronome || metronomeOffsetMs === 0}
+                  >
+                    Reset
+                  </button>
+                </label>
                 <span className="wave-playback-time">{playbackClockLabel}</span>
               </div>
 
@@ -1723,11 +1840,56 @@ function QuantizeDashboardPage() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [comparisonZoom, setComparisonZoom] = useState(1.5);
+  const [followPlaybackEnabled, setFollowPlaybackEnabled] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(PLAYHEAD_FOLLOW_STORAGE_KEY);
+      if (!stored) {
+        return true;
+      }
+
+      return stored === '1';
+    } catch {
+      return true;
+    }
+  });
+  const [followSensitivityPct, setFollowSensitivityPct] = useState(() => {
+    try {
+      const stored = window.localStorage.getItem(PLAYHEAD_FOLLOW_SENSITIVITY_STORAGE_KEY);
+      if (!stored) {
+        return 28;
+      }
+
+      const parsed = Number(stored);
+      if (!Number.isFinite(parsed)) {
+        return 28;
+      }
+
+      return Math.min(45, Math.max(20, Math.round(parsed)));
+    } catch {
+      return 28;
+    }
+  });
   const comparisonItems = useMemo(() => groupCloudFiles(cloudFiles), [cloudFiles]);
   const quantizationSummary = useMemo(
     () => (latestQuantizationResult ? readQuantizationDetailSummary(latestQuantizationResult) : null),
     [latestQuantizationResult],
   );
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PLAYHEAD_FOLLOW_STORAGE_KEY, followPlaybackEnabled ? '1' : '0');
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [followPlaybackEnabled]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(PLAYHEAD_FOLLOW_SENSITIVITY_STORAGE_KEY, String(followSensitivityPct));
+    } catch {
+      // Ignore storage failures.
+    }
+  }, [followSensitivityPct]);
 
   const currentEmail = auth.currentUser?.email || 'admin';
 
@@ -1909,6 +2071,7 @@ function QuantizeDashboardPage() {
     label: string,
     file: CloudFile | undefined,
     accentClassName: string,
+    syncGroupId: string,
     summary: QuantizationDetailSummary | null,
   ) => {
     if (!file) {
@@ -1929,6 +2092,11 @@ function QuantizeDashboardPage() {
             color={label.toLowerCase() === 'original' ? '#38bdf8' : '#c084fc'}
             comparisonLabel={label}
             playerId={`${label}-${file.name}`}
+            syncGroupId={syncGroupId}
+            followPlaybackEnabled={followPlaybackEnabled}
+            onFollowPlaybackEnabledChange={setFollowPlaybackEnabled}
+            followSensitivityPct={followSensitivityPct}
+            onFollowSensitivityPctChange={setFollowSensitivityPct}
             source={audioSource ? { label: file.name, url: audioSource, sizeBytes: file.size } : null}
             gridSec={summary?.gridSec}
             quantizedEvents={summary?.quantizedEvents}
@@ -2388,10 +2556,10 @@ function QuantizeDashboardPage() {
 
                     <div className="cloud-file-columns">
                       <div className="cloud-file-column">
-                        {renderCloudFileCell('Original', item.original, 'cloud-file-original', itemSummary)}
+                        {renderCloudFileCell('Original', item.original, 'cloud-file-original', item.trackKey, itemSummary)}
                       </div>
                       <div className="cloud-file-column">
-                        {renderCloudFileCell('Quantized', item.quantized, 'cloud-file-quantized', itemSummary)}
+                        {renderCloudFileCell('Quantized', item.quantized, 'cloud-file-quantized', item.trackKey, itemSummary)}
                       </div>
                     </div>
 
