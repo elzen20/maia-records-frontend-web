@@ -1434,7 +1434,9 @@ function WaveformPreviewCard({
         <span className={`wave-role-badge ${comparisonLabel.toLowerCase() === 'original' ? 'wave-role-badge-original' : 'wave-role-badge-quantized'}`}>
           {comparisonBadgeLabel}
         </span>
-        <span className="wave-grid-summary">{musicalGridLabel}</span>
+        <div className="wave-preview-header-right">
+          <span className="wave-grid-summary">{musicalGridLabel}</span>
+        </div>
       </div>
 
       {!source && <p className="wave-placeholder">No hay signed URL disponible todavía para este archivo.</p>}
@@ -1847,6 +1849,36 @@ function WaveformPreviewCard({
               <span ref={cursorMinimapRef} className="timeline-cursor" style={{ left: '0%' }} aria-hidden="true" />
             </div>
           </div>
+
+          {onZoomChange && (
+            <div className="wave-inline-zoom-controls wave-inline-zoom-controls-after" aria-label="Controles de zoom de la onda">
+              <button
+                type="button"
+                className="wave-inline-zoom-button"
+                onClick={() => onZoomChange(Math.max(0.5, Number((zoomLevel - 0.25).toFixed(2))))}
+                title="Reducir zoom"
+              >
+                -
+              </button>
+              <span className="wave-inline-zoom-label">x{zoomLevel.toFixed(1)}</span>
+              <button
+                type="button"
+                className="wave-inline-zoom-button"
+                onClick={() => onZoomChange(Math.min(6, Number((zoomLevel + 0.25).toFixed(2))))}
+                title="Aumentar zoom"
+              >
+                +
+              </button>
+              <button
+                type="button"
+                className="wave-inline-zoom-reset"
+                onClick={() => onZoomChange(1.5)}
+                title="Resetear zoom"
+              >
+                Reset
+              </button>
+            </div>
+          )}
         </>
       )}
     </article>
@@ -2635,17 +2667,6 @@ function QuantizeDashboardPage() {
       <section ref={comparisonSectionRef} className="quantize-panel temp-files-panel">
         <h2>Comparación Before / After</h2>
         <p>Los archivos se eliminan automáticamente después de 24 horas.</p>
-        <div className="comparison-zoom-controls">
-          <button type="button" onClick={() => setComparisonZoom((value) => Math.max(0.5, Number((value - 0.25).toFixed(2))))}>
-            Zoom out
-          </button>
-          <button type="button" onClick={() => setComparisonZoom((value) => Math.min(6, Number((value + 0.25).toFixed(2))))}>
-            Zoom in
-          </button>
-          <button type="button" onClick={() => setComparisonZoom(1.5)}>
-            Reset
-          </button>
-        </div>
 
         {gcsConfigured === false && <p className="section-state">GCS no está configurado todavía. Cuando se habilite, aquí aparecerán los pares de audio.</p>}
         {gcsConfigured !== false && cloudFilesLoading && <p className="section-state">Cargando archivos en la nube...</p>}

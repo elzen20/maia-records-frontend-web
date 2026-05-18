@@ -414,6 +414,14 @@
   margin-bottom: 10px;
 }
 
+.wave-preview-header-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .wave-role-badge {
   padding: 4px 10px;
   border-radius: 999px;
@@ -437,6 +445,49 @@
   color: var(--text-muted);
   font-size: 0.82rem;
   text-align: right;
+}
+
+.wave-inline-zoom-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.wave-inline-zoom-controls-after {
+  margin-top: 10px;
+}
+
+.wave-inline-zoom-button,
+.wave-inline-zoom-reset {
+  min-height: 26px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.26);
+  background: rgba(30, 41, 59, 0.8);
+  color: #e2e8f0;
+  font-weight: 700;
+}
+
+.wave-inline-zoom-button {
+  min-width: 28px;
+  padding: 0 8px;
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.wave-inline-zoom-reset {
+  padding: 0 9px;
+  font-size: 0.72rem;
+}
+
+.wave-inline-zoom-label {
+  min-width: 34px;
+  text-align: center;
+  font-size: 0.76rem;
+  color: #cbd5e1;
 }
 
 .wave-playback-controls {
@@ -689,17 +740,6 @@
 .comparison-cursor-readout {
   margin-top: 2px;
   color: #c4b5fd;
-}
-
-.comparison-zoom-controls {
-  display: flex;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 10px 0 14px;
-}
-
-.comparison-zoom-controls button {
-  min-width: 104px;
 }
 
 .metronome-controls {
